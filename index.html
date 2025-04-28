@@ -86,9 +86,61 @@
             cursor: pointer;
             border-radius: 4px;
         }
+        .toggle-container {
+            margin: 15px 0;
+            padding: 10px;
+            background-color: #444;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+            margin-right: 10px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
     </style>
-    <!-- Import map to specify module locations -->
-    <script type="importmap">
+    
+    <!-- Original implementation script (will be conditional) -->
+    <script id="original-script" type="text/javascript"></script>
+    
+    <!-- New implementation import map (will be conditional) -->
+    <script id="importmap-script" type="importmap">
     {
       "imports": {
         "gameboy": "./index.js",
@@ -113,6 +165,14 @@
 </header>
 
 <div id="container">
+
+<div class="toggle-container">
+    <label class="toggle-switch">
+        <input type="checkbox" id="implementation-toggle" checked>
+        <span class="slider"></span>
+    </label>
+    <span id="current-implementation">Using: Refactored Implementation</span>
+</div>
 
 <div id="audio-permission" class="hide">
     <p>This emulator requires audio permission for the best experience.</p>
@@ -178,60 +238,101 @@
 
 </div>
 
-<!-- Use type="module" for ES modules -->
-<script type="module">
-// Import the GameboyJS namespace
-import GameboyJS from 'gameboy';
-import { Keyboard } from './input.js';
+<!-- Implementation Toggle Script -->
+<script>
+// Check localStorage or default to refactored implementation
+const useOriginal = localStorage.getItem('useOriginalImplementation') === 'true';
+const toggleSwitch = document.getElementById('implementation-toggle');
+toggleSwitch.checked = !useOriginal; // Toggle is ON for refactored
 
-// Audio context initialization
-let audioContext = null;
-var g; // Make g variable global
+// Update the displayed implementation text
+document.getElementById('current-implementation').textContent = 
+    `Using: ${useOriginal ? 'Original' : 'Refactored'} Implementation`;
 
-function initAudio() {
-    try {
-        window.AudioContext = window.AudioContext || window.webkitAudioContext;
-        audioContext = new AudioContext();
-        
-        // If audio context is suspended (needs user interaction)
-        if (audioContext.state === 'suspended') {
-            document.getElementById('audio-permission').classList.remove('hide');
-        } else {
-            setupGameboy();
-        }
-    } catch (e) {
-        console.error("Web Audio API is not supported in this browser");
-        setupGameboy();
-    }
-}
-
-document.getElementById('enable-audio').addEventListener('click', function() {
-    if (audioContext) {
-        audioContext.resume().then(() => {
-            document.getElementById('audio-permission').classList.add('hide');
-            setupGameboy();
-        });
-    }
+// Toggle switch event listener
+toggleSwitch.addEventListener('change', function() {
+    localStorage.setItem('useOriginalImplementation', (!this.checked).toString());
+    location.reload(); // Reload the page to apply the change
 });
 
-// configuration
-function setupGameboy() {
-    var opts = {
-        pad: {class: Keyboard, mapping: null},
-        romReaders: [
-            new GameboyJS.RomFileReader(),
-            new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
-        ]
+// Load the appropriate implementation
+if (useOriginal) {
+    // Load original implementation
+    const script = document.getElementById('original-script');
+    script.src = "./gameboy.js";
+    
+    // Initialize after script loads
+    script.onload = function() {
+        const opts = {
+            pad: {class: GameboyJS.Keyboard, mapping: null},
+            romReaders: [
+                new GameboyJS.RomFileReader(),
+                new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
+            ]
+        };
+        window.g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
+        g.setSoundEnabled(document.getElementById('sound-enable').checked);
+        g.setScreenZoom(document.getElementById('screen-zoom').value);
     };
-    g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
-    g.setSoundEnabled(document.getElementById('sound-enable').checked);
-    g.setScreenZoom(document.getElementById('screen-zoom').value);
-}
+} else {
+    // Load refactored implementation with ES modules
+    const moduleScript = document.createElement('script');
+    moduleScript.type = 'module';
+    moduleScript.textContent = `
+        // Import the GameboyJS namespace
+        import GameboyJS from 'gameboy';
+        import { Keyboard } from './input.js';
 
-// When document is loaded, initialize the Audio
-document.addEventListener('DOMContentLoaded', function() {
-    initAudio();
-});
+        // Audio context initialization
+        let audioContext = null;
+        
+        function initAudio() {
+            try {
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContext();
+                
+                // If audio context is suspended (needs user interaction)
+                if (audioContext.state === 'suspended') {
+                    document.getElementById('audio-permission').classList.remove('hide');
+                } else {
+                    setupGameboy();
+                }
+            } catch (e) {
+                console.error("Web Audio API is not supported in this browser");
+                setupGameboy();
+            }
+        }
+
+        document.getElementById('enable-audio').addEventListener('click', function() {
+            if (audioContext) {
+                audioContext.resume().then(() => {
+                    document.getElementById('audio-permission').classList.add('hide');
+                    setupGameboy();
+                });
+            }
+        });
+
+        // configuration
+        function setupGameboy() {
+            var opts = {
+                pad: {class: Keyboard, mapping: null},
+                romReaders: [
+                    new GameboyJS.RomFileReader(),
+                    new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
+                ]
+            };
+            window.g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
+            g.setSoundEnabled(document.getElementById('sound-enable').checked);
+            g.setScreenZoom(document.getElementById('screen-zoom').value);
+        }
+
+        // When document is loaded, initialize the Audio
+        document.addEventListener('DOMContentLoaded', function() {
+            initAudio();
+        });
+    `;
+    document.body.appendChild(moduleScript);
+}
 </script>
 
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
