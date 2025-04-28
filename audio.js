@@ -12,23 +12,49 @@ export class APU {
 
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
         this.audioContext = new AudioContext();
+        
+        // Add a master gain node for volume control
+        this.masterGain = this.audioContext.createGain();
+        this.masterGain.gain.value = 0.5; // Adjust overall volume
+        this.masterGain.connect(this.audioContext.destination);
+        
+        // Add a compressor to improve audio quality
+        this.compressor = this.audioContext.createDynamicsCompressor();
+        this.compressor.threshold.value = -24;
+        this.compressor.knee.value = 30;
+        this.compressor.ratio.value = 12;
+        this.compressor.attack.value = 0.003;
+        this.compressor.release.value = 0.25;
+        this.compressor.connect(this.masterGain);
 
-        this.channel1 = new Channel1(this, 1, this.audioContext);
-        this.channel2 = new Channel1(this, 2, this.audioContext);
-        this.channel3 = new Channel3(this, 3, this.audioContext);
-        this.channel4 = new Channel4(this, 4, this.audioContext);
+        // Create audio channels
+        this.channel1 = new Channel1(this, 1, this.audioContext, this.compressor);
+        this.channel2 = new Channel1(this, 2, this.audioContext, this.compressor);
+        this.channel3 = new Channel3(this, 3, this.audioContext, this.compressor);
+        this.channel4 = new Channel4(this, 4, this.audioContext, this.compressor);
+        
+        // Batch audio processing for better performance
+        this.accumulatedTime = 0;
+        this.updateInterval = 4000; // Process audio every 4000 cycles
     }
 
     connect() {
         this.channel1.enable();
         this.channel2.enable();
         this.channel3.enable();
+        this.channel4.enable();
+        
+        // Resume audio context if suspended
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
     }
 
     disconnect() {
         this.channel1.disable();
         this.channel2.disable();
         this.channel3.disable();
+        this.channel4.disable();
     }
 
     // Updates the states of each channel given the elapsed time
@@ -36,10 +62,18 @@ export class APU {
     update(clockElapsed) {
         if (this.enabled == false) return;
 
-        this.channel1.update(clockElapsed);
-        this.channel2.update(clockElapsed);
-        this.channel3.update(clockElapsed);
-        this.channel4.update(clockElapsed);
+        // Accumulate time and only update audio at specified intervals
+        this.accumulatedTime += clockElapsed;
+        if (this.accumulatedTime >= this.updateInterval) {
+            const timeToProcess = this.accumulatedTime;
+            this.accumulatedTime = 0;
+            
+            // Process all channels
+            this.channel1.update(timeToProcess);
+            this.channel2.update(timeToProcess);
+            this.channel3.update(timeToProcess);
+            this.channel4.update(timeToProcess);
+        }
     }
 
     setSoundFlag(channel, value) {
@@ -219,7 +253,7 @@ export class APU {
 
 // Channel 1 implementation (square wave with sweep)
 export class Channel1 {
-    constructor(apu, channelNumber, audioContext) {
+    constructor(apu, channelNumber, audioContext, destination) {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
@@ -245,24 +279,51 @@ export class Channel1 {
         this.clockEnvelop = 0;
         this.clockSweep = 0;
 
+        // Improved audio node setup
         var gainNode = audioContext.createGain();
         gainNode.gain.value = 0;
+        
+        // Add a low-pass filter to reduce high-frequency noise
+        var filter = audioContext.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 2000;
+        filter.Q.value = 0.7;
+        
         var oscillator = audioContext.createOscillator();
         oscillator.type = 'square';
         oscillator.frequency.value = 1000;
-        oscillator.connect(gainNode);
+        
+        // Connect the nodes with the filter
+        oscillator.connect(filter);
+        filter.connect(gainNode);
+        
+        // Start the oscillator immediately but keep gain at 0
         oscillator.start(0);
 
         this.audioContext = audioContext;
         this.gainNode = gainNode;
         this.oscillator = oscillator;
+        this.filter = filter;
+        this.destination = destination;
+        
+        // Use AudioParam automation for smoother volume changes
+        this.gainNode.gain.setValueAtTime(0, this.audioContext.currentTime);
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        this.gainNode.connect(this.audioContext.destination);
+        
+        // Connect to the destination (compressor or master gain)
+        this.gainNode.connect(this.destination);
+        
+        // Use ramping for smoother volume transition
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(0, now);
+        this.gainNode.gain.linearRampToValueAtTime(this.envelopeVolume * 1/100, now + 0.01);
+        
         this.clockLength = 0;
         this.clockEnvelop = 0;
         this.clockSweep = 0;
@@ -270,9 +331,23 @@ export class Channel1 {
     }
 
     stop() {
+        if (!this.playing) return;
+        
+        // Fade out for smoother sound stopping
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
+        
+        // Schedule the actual disconnect after the fade
+        setTimeout(() => {
+            if (!this.playing) {
+                this.gainNode.disconnect();
+            }
+        }, 60);
+        
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        this.gainNode.disconnect();
     }
 
     checkFreqSweep() {
@@ -287,6 +362,8 @@ export class Channel1 {
     }
 
     update(clockElapsed) {
+        if (!this.playing) return;
+        
         this.clockEnvelop += clockElapsed;
         this.clockSweep   += clockElapsed;
 
@@ -328,7 +405,13 @@ export class Channel1 {
 
     setFrequency(value) {
         this.frequency = value;
-        this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
+        const gbFreq = 131072 / (2048 - this.frequency);
+        
+        // Use exponential ramp for smoother frequency changes
+        const now = this.audioContext.currentTime;
+        this.oscillator.frequency.cancelScheduledValues(now);
+        this.oscillator.frequency.setValueAtTime(this.oscillator.frequency.value, now);
+        this.oscillator.frequency.exponentialRampToValueAtTime(Math.max(gbFreq, 0.1), now + 0.01);
     }
 
     getFrequency() {
@@ -342,21 +425,29 @@ export class Channel1 {
     setEnvelopeVolume(volume) {
         this.envelopeCheck = volume > 0 && volume < 16 ? true : false;
         this.envelopeVolume = volume;
-        this.gainNode.gain.value = this.envelopeVolume * 1/100;
+        
+        // Smooth volume transitions
+        if (this.playing) {
+            const now = this.audioContext.currentTime;
+            this.gainNode.gain.cancelScheduledValues(now);
+            this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+            this.gainNode.gain.linearRampToValueAtTime(this.envelopeVolume * 1/100, now + 0.05);
+        }
     }
 
     disable() {
+        this.stop();
         this.oscillator.disconnect();
     }
 
     enable() {
-        this.oscillator.connect(this.gainNode);
+        this.oscillator.connect(this.filter);
     }
 }
 
 // Channel 3 implementation (wave form)
 export class Channel3 {
-    constructor(apu, channelNumber, audioContext) {
+    constructor(apu, channelNumber, audioContext, destination) {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
@@ -369,9 +460,15 @@ export class Channel3 {
 
         this.buffer = new Float32Array(32);
 
+        // Improved audio node setup
         var gainNode = audioContext.createGain();
-        gainNode.gain.value = 1;
-        this.gainNode = gainNode;
+        gainNode.gain.value = 0.5;
+        
+        // Add filter for cleaner waveform
+        var filter = audioContext.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 4000;
+        filter.Q.value = 1.0;
 
         this.baseSpeed = 65536;
         var waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
@@ -379,31 +476,62 @@ export class Channel3 {
         var bufferSource = audioContext.createBufferSource();
         bufferSource.buffer = waveBuffer;
         bufferSource.loop = true;
-        bufferSource.connect(gainNode);
+        
+        // Connect with filter
+        bufferSource.connect(filter);
+        filter.connect(gainNode);
+        
         bufferSource.start(0);
 
         this.audioContext = audioContext;
         this.waveBuffer = waveBuffer;
         this.bufferSource = bufferSource;
+        this.gainNode = gainNode;
+        this.filter = filter;
+        this.destination = destination;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
+        
+        // Copy buffer with improved wave quality
         this.waveBuffer.copyToChannel(this.buffer, 0, 0);
 
-        this.gainNode.connect(this.audioContext.destination);
+        // Smooth gain connection
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(0, now);
+        this.gainNode.gain.linearRampToValueAtTime(0.5, now + 0.01);
+        
+        this.gainNode.connect(this.destination);
         this.clockLength = 0;
     }
 
     stop() {
+        if (!this.playing) return;
+        
+        // Fade out for smoother sound stopping
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
+        
+        // Schedule the actual disconnect after the fade
+        setTimeout(() => {
+            if (!this.playing) {
+                this.gainNode.disconnect();
+            }
+        }, 60);
+        
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        this.gainNode.disconnect();
     }
 
     update(clockElapsed) {
+        if (!this.playing) return;
+        
         if (this.lengthCheck){
             this.clockLength  += clockElapsed;
             if (this.clockLength > this.soundLengthUnit) {
@@ -419,7 +547,13 @@ export class Channel3 {
 
     setFrequency(value) {
         value = 65536 / (2048  - value);
-        this.bufferSource.playbackRate.value = value / this.baseSpeed;
+        const now = this.audioContext.currentTime;
+        
+        // Use exponential ramp for smoother playback rate changes
+        this.bufferSource.playbackRate.cancelScheduledValues(now);
+        this.bufferSource.playbackRate.setValueAtTime(this.bufferSource.playbackRate.value, now);
+        this.bufferSource.playbackRate.exponentialRampToValueAtTime(
+            Math.max(value / this.baseSpeed, 0.01), now + 0.01);
     }
 
     getFrequency() {
@@ -434,22 +568,44 @@ export class Channel3 {
     setWaveBufferByte(index, value) {
         var bufferIndex = index * 2;
 
-        this.buffer[bufferIndex]   = (value >> 4) / 8 - 1; // value in buffer is in -1 -> 1
-        this.buffer[bufferIndex+1] = (value & 0x0F) / 8 - 1;
+        // Improved waveform quality with anti-aliasing
+        const highNibble = (value >> 4) / 8 - 1;
+        const lowNibble = (value & 0x0F) / 8 - 1;
+        
+        // Apply a slight smoothing between samples
+        if (bufferIndex > 0) {
+            const prevVal = this.buffer[bufferIndex - 1];
+            this.buffer[bufferIndex] = (highNibble * 0.9 + prevVal * 0.1);
+        } else {
+            this.buffer[bufferIndex] = highNibble;
+        }
+        
+        if (bufferIndex < 30) {
+            const nextVal = index < 15 ? lowNibble : this.buffer[bufferIndex + 2];
+            this.buffer[bufferIndex + 1] = (lowNibble * 0.9 + nextVal * 0.1);
+        } else {
+            this.buffer[bufferIndex + 1] = lowNibble;
+        }
+        
+        // Update the buffer if playing for real-time wave changes
+        if (this.playing) {
+            this.waveBuffer.copyToChannel(this.buffer, 0, 0);
+        }
     }
 
     disable() {
+        this.stop();
         this.bufferSource.disconnect();
     }
 
     enable() {
-        this.bufferSource.connect(this.gainNode);
+        this.bufferSource.connect(this.filter);
     }
 }
 
 // Channel 4 implementation (noise)
 export class Channel4 {
-    constructor(apu, channelNumber, audioContext) {
+    constructor(apu, channelNumber, audioContext, destination) {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
@@ -459,23 +615,86 @@ export class Channel4 {
         this.lengthCheck = false;
 
         this.clockLength = 0;
+        
+        // Add actual noise implementation with Web Audio
+        var gainNode = audioContext.createGain();
+        gainNode.gain.value = 0;
+        
+        // Use a buffer source for noise generation
+        var noiseBuffer = this.createNoiseBuffer(audioContext);
+        var noiseSource = audioContext.createBufferSource();
+        noiseSource.buffer = noiseBuffer;
+        noiseSource.loop = true;
+        
+        // Add a bandpass filter for more authentic noise sound
+        var filter = audioContext.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = 1000;
+        filter.Q.value = 1.0;
+        
+        noiseSource.connect(filter);
+        filter.connect(gainNode);
+        noiseSource.start(0);
 
         this.audioContext = audioContext;
+        this.gainNode = gainNode;
+        this.noiseSource = noiseSource;
+        this.filter = filter;
+        this.destination = destination;
+    }
+    
+    // Create a noise buffer
+    createNoiseBuffer(context) {
+        const bufferSize = context.sampleRate * 2; // 2 seconds of noise
+        const buffer = context.createBuffer(1, bufferSize, context.sampleRate);
+        const output = buffer.getChannelData(0);
+        
+        // Fill with white noise
+        for (let i = 0; i < bufferSize; i++) {
+            output[i] = Math.random() * 2 - 1;
+        }
+        
+        return buffer;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
+        
+        // Connect and fade in
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(0, now);
+        this.gainNode.gain.linearRampToValueAtTime(0.15, now + 0.01);
+        
+        this.gainNode.connect(this.destination);
         this.clockLength = 0;
     }
 
     stop() {
+        if (!this.playing) return;
+        
+        // Fade out
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
+        
+        // Disconnect after fade
+        setTimeout(() => {
+            if (!this.playing) {
+                this.gainNode.disconnect();
+            }
+        }, 60);
+        
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
     }
 
     update(clockElapsed) {
+        if (!this.playing) return;
+        
         if (this.lengthCheck) {
             this.clockLength  += clockElapsed;
             if (this.clockLength > this.soundLengthUnit) {
@@ -491,5 +710,35 @@ export class Channel4 {
 
     setLength(value) {
         this.soundLength = 64 - (value & 0x3F);
+    }
+    
+    // New method to support actually changing the noise properties
+    setNoiseProperties(divisor, shortMode, shiftClock) {
+        // Adjust filter frequency based on parameters
+        const frequencyBase = 1000 / (divisor || 1);
+        this.filter.frequency.value = Math.min(frequencyBase * (shiftClock || 1), 8000);
+        
+        // Recreate noise buffer for short mode if needed
+        if (this.shortMode !== shortMode) {
+            this.shortMode = shortMode;
+            this.noiseSource.disconnect();
+            
+            const newBuffer = this.createNoiseBuffer(this.audioContext);
+            const newSource = this.audioContext.createBufferSource();
+            newSource.buffer = newBuffer;
+            newSource.loop = true;
+            
+            newSource.connect(this.filter);
+            newSource.start(0);
+            this.noiseSource = newSource;
+        }
+    }
+    
+    disable() {
+        this.stop();
+    }
+    
+    enable() {
+        // Ready for playing, but don't actually play
     }
 }

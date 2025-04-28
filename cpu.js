@@ -20,6 +20,14 @@ export class CPU {
         this.isPaused = false;
         this.usingBootRom = false;
 
+        // Performance tracking
+        this.lastFrameTime = 0;
+        this.cyclesPerFrame = 70224; // Cycles per frame (4194304 Hz / ~60 FPS)
+        this.frameTimeHistory = [];
+        this.fpsHistory = [];
+        this.lastFpsUpdate = 0;
+        this.currentFps = 60;
+
         this.createDevices();
     }
 
@@ -48,6 +56,12 @@ export class CPU {
     reset() {
         this.memory.reset();
         this.r.sp = 0xFFFE;
+        
+        // Reset performance tracking
+        this.lastFrameTime = 0;
+        this.frameTimeHistory = [];
+        this.fpsHistory = [];
+        this.lastFpsUpdate = 0;
     }
 
     loadRom(data) {
@@ -88,17 +102,43 @@ export class CPU {
         } else {
             this.r.pc = 0x0100;
         }
-        this.frame();
+        this.lastFrameTime = performance.now();
+        requestAnimationFrame(this.frame.bind(this));
     }
 
     stop() {
-        clearTimeout(this.nextFrameTimer);
+        this.isPaused = true;
     }
 
-    // Fetch-and-execute loop with better error handling
-    frame() {
-        if (!this.isPaused) {
-            this.nextFrameTimer = setTimeout(this.frame.bind(this), 1000 / 60); 
+    // Improved fetch-and-execute loop with better timing
+    frame(timestamp) {
+        if (this.isPaused) return;
+        
+        // Schedule next frame immediately to maintain frame rate
+        requestAnimationFrame(this.frame.bind(this));
+        
+        // Calculate time elapsed and expected cycles to execute
+        const now = timestamp || performance.now();
+        const elapsed = now - this.lastFrameTime;
+        this.lastFrameTime = now;
+        
+        // Track FPS
+        this.frameTimeHistory.push(elapsed);
+        if (this.frameTimeHistory.length > 60) {
+            this.frameTimeHistory.shift();
+        }
+        
+        if (now - this.lastFpsUpdate > 1000) {
+            const totalTime = this.frameTimeHistory.reduce((a, b) => a + b, 0);
+            this.currentFps = this.frameTimeHistory.length / (totalTime / 1000);
+            this.fpsHistory.push(this.currentFps);
+            if (this.fpsHistory.length > 10) this.fpsHistory.shift();
+            this.lastFpsUpdate = now;
+            
+            // Log performance for debugging
+            if (window.DEBUG_PERFORMANCE) {
+                console.log(`FPS: ${this.currentFps.toFixed(1)}, Avg Frame time: ${(totalTime / this.frameTimeHistory.length).toFixed(2)}ms`);
+            }
         }
 
         try {
@@ -130,16 +170,15 @@ export class CPU {
                     this.clock.c += 4;
                 }
 
-                var elapsed = this.clock.c - oldInstrCount;
-                vblank = this.gpu.update(elapsed);
-                this.timer.update(elapsed);
+                var elapsedCycles = this.clock.c - oldInstrCount;
+                vblank = this.gpu.update(elapsedCycles);
+                this.timer.update(elapsedCycles);
                 this.input.update();
-                this.apu.update(elapsed);
+                this.apu.update(elapsedCycles);
                 this.checkInterrupt();
             }
             this.clock.c = 0;
         } catch (e) {
-            // Improve error handling with more context
             console.error("Error during CPU execution:", e);
             this.gameboy.handleException(e);
         }
@@ -186,7 +225,8 @@ export class CPU {
     unpause() {
         if (this.isPaused) {
             this.isPaused = false;
-            this.frame();
+            this.lastFrameTime = performance.now();
+            requestAnimationFrame(this.frame.bind(this));
         }
     }
 
