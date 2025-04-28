@@ -1,4 +1,4 @@
-// cpu.js - Updates for better debugger performance
+// cpu.js - Heavily optimized CPU implementation
 
 import { opcodeMap, opcodeCbmap, CPUInterrupts } from './constants.js';
 import { Memory } from './memory.js';
@@ -8,26 +8,40 @@ import { ConsoleSerial } from './utils.js';
 import { loadboot } from './bootrom.js';
 import { cpuOps } from './cpu-operations.js';
 
-// CPU class
+// CPU class with performance optimizations
 export class CPU {
     constructor(gameboy) {
         this.gameboy = gameboy;
 
-        this.r = {A:0, F: 0, B:0, C:0, D:0, E:0, H:0, L:0, pc:0, sp:0};
+        // Use direct assignment instead of object literal for better performance
+        this.r = new CpuRegisters();
         this.IME = true;
         this.clock = {c: 0, serial: 0};
         this.isHalted = false;
         this.isPaused = false;
         this.usingBootRom = false;
         this.debugMode = false;
+        this.clockMultiplier = 1.0; // Speed control
         
-        // Performance tracking
+        // Performance tracking with high-resolution timestamps
         this.lastFrameTime = performance.now();
         this.frameCount = 0;
         this.fpsUpdateInterval = 1000; // Update FPS once per second
         this.lastFpsUpdate = 0;
         this.currentFps = 0;
-
+        this.fpsHistory = new Array(60).fill(60); // Keep track of recent FPS values
+        this.frameSkipCount = 0;
+        this.maxFrameSkip = 2; // Maximum number of frames to skip when lagging
+        this.frameSkipThreshold = 50; // FPS below which we start skipping frames
+        
+        // Pre-allocate reusable buffers for common operations
+        this._tempBuffer = new Uint8Array(256);
+        
+        // Execution metrics 
+        this.instructionsPerFrame = 0;
+        this.totalInstructions = 0;
+        this.lastPerformanceUpdate = 0;
+        
         this.createDevices();
     }
 
@@ -56,6 +70,22 @@ export class CPU {
     reset() {
         this.memory.reset();
         this.r.sp = 0xFFFE;
+        this.r.pc = 0;
+        this.r.A = 0;
+        this.r.F = 0;
+        this.r.B = 0;
+        this.r.C = 0;
+        this.r.D = 0;
+        this.r.E = 0;
+        this.r.H = 0;
+        this.r.L = 0;
+        this.IME = true;
+        this.clock.c = 0;
+        this.clock.serial = 0;
+        this.isHalted = false;
+        this.instructionsPerFrame = 0;
+        this.totalInstructions = 0;
+        
         if (this.gameboy.debugger) {
             this.gameboy.debugger.log('CPU reset');
         }
@@ -77,104 +107,119 @@ export class CPU {
     }
 
     getRamSize() {
-        var size = 0;
-        switch (this.memory.rb(0x149)) {
-            case 1:
-                size = 2048;
-                break;
-            case 2:
-                size = 2048 * 4;
-                break;
-            case 3:
-                size = 2048 * 16;
-                break;
+        const ramSizeCode = this.memory.rb(0x149);
+        switch (ramSizeCode) {
+            case 1: return 2048; // 2KB
+            case 2: return 8192; // 8KB
+            case 3: return 32768; // 32KB
+            case 4: return 131072; // 128KB
+            case 5: return 65536; // 64KB
+            default: return 0;
         }
-
-        return size;
     }
 
     getGameName() {
-        var name = '';
-        for (var i = 0x134; i < 0x143; i++) {
-            var char = this.memory.rb(i) || 32;
-            name += String.fromCharCode(char);
+        // Use pre-allocated buffer instead of creating strings in a loop
+        for (let i = 0x134, j = 0; i < 0x143; i++, j++) {
+            this._tempBuffer[j] = this.memory.rb(i) || 32;
         }
-
-        return name;
+        // Only create string once at the end
+        return String.fromCharCode.apply(null, this._tempBuffer.subarray(0, 0x143 - 0x134));
     }
 
-    // Start the execution of the emulator
+    // Optimized run method using requestAnimationFrame for more consistent timing
     run() {
         if (this.usingBootRom) {
             this.r.pc = 0x0000;
         } else {
             this.r.pc = 0x0100;
         }
-        this.frame();
+        
+        this.isPaused = false;
+        this.lastFrameTime = performance.now();
+        this.frameCount = 0;
+        this.lastFpsUpdate = this.lastFrameTime;
+        
+        // Use requestAnimationFrame for better timing
+        if (this.rafId) {
+            cancelAnimationFrame(this.rafId);
+        }
+        this.rafId = requestAnimationFrame(this.frameRaf.bind(this));
+        
         if (this.gameboy.debugger) {
-            this.gameboy.debugger.log('CPU execution started');
+            this.gameboy.debugger.log('CPU execution started with optimized timing');
         }
     }
 
     stop() {
-        clearTimeout(this.nextFrameTimer);
+        if (this.rafId) {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+        }
+        if (this.nextFrameTimer) {
+            clearTimeout(this.nextFrameTimer);
+            this.nextFrameTimer = null;
+        }
+        
         if (this.gameboy.debugger) {
             this.gameboy.debugger.log('CPU execution stopped');
         }
     }
 
-    // Modified frame method with FPS tracking and debugger optimizations
-    frame() {
-        if (!this.isPaused) {
-            this.nextFrameTimer = setTimeout(this.frame.bind(this), 1000 / 60); 
+    // New optimized frame method using requestAnimationFrame for smoother animation
+    frameRaf(timestamp) {
+        if (this.isPaused) {
+            this.rafId = null;
+            return;
         }
-
+        
+        this.rafId = requestAnimationFrame(this.frameRaf.bind(this));
+        
         try {
-            // Track frame performance
-            const now = performance.now();
+            // Track frame performance with high-resolution timer
+            const now = timestamp || performance.now();
             const frameDelta = now - this.lastFrameTime;
             this.lastFrameTime = now;
-            this.frameCount++;
+            
+            // Calculate target time per frame for 60fps (16.67ms)
+            const targetFrameTime = 1000 / 60;
+            
+            // Skip frame if we're running too slowly and frame skipping is enabled
+            if (this.frameSkipCount > 0) {
+                this.frameSkipCount--;
+                return;
+            }
             
             // Update FPS counter every second
             if (now - this.lastFpsUpdate > this.fpsUpdateInterval) {
-                this.currentFps = this.frameCount / ((now - this.lastFpsUpdate) / 1000);
+                this.currentFps = (this.frameCount * 1000) / (now - this.lastFpsUpdate);
+                
+                // Update FPS history
+                this.fpsHistory.shift();
+                this.fpsHistory.push(this.currentFps);
+                
+                // Calculate average FPS
+                const avgFps = this.fpsHistory.reduce((a, b) => a + b, 0) / this.fpsHistory.length;
+                
+                // Adjust frame skipping based on performance
+                if (avgFps < this.frameSkipThreshold && this.maxFrameSkip > 0) {
+                    this.frameSkipCount = Math.min(
+                        Math.floor(this.frameSkipThreshold / avgFps), 
+                        this.maxFrameSkip
+                    );
+                }
+                
+                // Reset counters
                 this.frameCount = 0;
                 this.lastFpsUpdate = now;
+                this.instructionsPerFrame = 0;
             }
-
-            // Main execution loop
-            var vblank = false;
-            while (!vblank) {
-                var oldInstrCount = this.clock.c;
-                if (!this.isHalted) {
-                    this.executeInstruction();
-
-                    if (this.enableSerial) {
-                        var instr = this.clock.c - oldInstrCount;
-                        this.clock.serial += instr;
-                        if (this.clock.serial >= 8 * this.SERIAL_INTERNAL_INSTR) {
-                            this.endSerialTransfer();
-                        }
-                    }
-                } else {
-                    this.clock.c += 4;
-                }
-
-                var elapsed = this.clock.c - oldInstrCount;
-                vblank = this.gpu.update(elapsed);
-                this.timer.update(elapsed);
-                this.input.update();
-                this.apu.update(elapsed);
-                this.checkInterrupt();
-            }
-            this.clock.c = 0;
             
-            // Update debug performance metrics, but only if debugger is enabled
-            if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
-                this.gameboy.debugger.updatePerformanceMetrics();
-                this.gameboy.debugger.updateUI();
-            }
+            this.frameCount++;
+            
+            // Execute a frame's worth of instructions
+            this.executeFrame();
+            
         } catch (e) {
             if (this.gameboy.debugger) {
                 this.gameboy.debugger.handleError(e, 'CPU Execution');
@@ -183,12 +228,59 @@ export class CPU {
             }
         }
     }
+    
+    // Execute a full frame of CPU instructions
+    executeFrame() {
+        let vblank = false;
+        this.instructionsPerFrame = 0;
+        
+        while (!vblank) {
+            const oldInstrCount = this.clock.c;
+            
+            if (!this.isHalted) {
+                this.executeInstruction();
+                this.instructionsPerFrame++;
+                this.totalInstructions++;
 
-    // Modified executeInstruction for better debugger integration
+                if (this.enableSerial) {
+                    const instr = this.clock.c - oldInstrCount;
+                    this.clock.serial += instr;
+                    if (this.clock.serial >= 8 * this.SERIAL_INTERNAL_INSTR) {
+                        this.endSerialTransfer();
+                    }
+                }
+            } else {
+                this.clock.c += 4;
+            }
+
+            const elapsed = this.clock.c - oldInstrCount;
+            vblank = this.gpu.update(elapsed);
+            this.timer.update(elapsed);
+            this.input.update();
+            this.apu.update(elapsed);
+            this.checkInterrupt();
+        }
+        
+        this.clock.c = 0;
+        
+        // Update debug performance metrics, but only if debugger is enabled
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
+            this.gameboy.debugger.updatePerformanceMetrics();
+            this.gameboy.debugger.updateUI();
+        }
+    }
+
+    // Optimized instruction execution with inline opcode lookup
     executeInstruction() {
-        var opcode = this.fetchOpcode();
-        if (opcode !== null) {
-            // Only record the opcode if debugger is enabled and active
+        try {
+            const opcode = this.memory.rb(this.r.pc++);
+            const operation = opcodeMap[opcode];
+            
+            if (!operation) {
+                throw new Error(`Unknown opcode ${opcode.toString(16)} at address ${(this.r.pc-1).toString(16)}`);
+            }
+            
+            // Only check for breakpoints if debugger is actually enabled and active
             if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
                 this.gameboy.debugger.recordOpcode(this.r.pc - 1, opcode);
                 
@@ -198,12 +290,19 @@ export class CPU {
                 }
             }
             
-            opcodeMap[opcode](this);
-            this.r.F &= 0xF0; // tmp fix
+            operation(this);
+            this.r.F &= 0xF0; // Ensure lower 4 bits are always clear
+        } catch (error) {
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.handleError(error, 'Execute Instruction');
+            } else {
+                console.error(`CPU error: ${error.message} at ${(this.r.pc-1).toString(16)}`);
+                this.stop();
+            }
         }
     }
 
-    // Execute a single instruction
+    // Execute a single instruction - specifically for debugger stepping
     executeSingleInstruction() {
         if (!this.isHalted) {
             this.executeInstruction();
@@ -216,39 +315,17 @@ export class CPU {
         this.apu.update(4);
         this.checkInterrupt();
         
-        if (this.gameboy.debugger) {
-            this.gameboy.debugger.updateUI();
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
+            this.gameboy.debugger.updateUI(true); // Force update
         }
     }
 
-    fetchOpcode() {
-        try {
-            var opcode = this.memory.rb(this.r.pc++);
-            if (opcode === undefined) {
-                throw new Error(`Invalid opcode at ${(this.r.pc-1).toString(16)}`);
-            }
-            if (!opcodeMap[opcode]) {
-                throw new Error(`Unknown opcode ${opcode.toString(16)} at address ${(this.r.pc-1).toString(16)}`);
-            }
-
-            return opcode;
-        } catch (error) {
-            if (this.gameboy.debugger) {
-                this.gameboy.debugger.handleError(error, 'Fetch Opcode');
-            } else {
-                console.error(error + ' at ' + (this.r.pc-1).toString(16));
-                this.stop();
-            }
-            return null;
-        }
-    }
-
-    // Read register
+    // Direct register read for better performance
     rr(register) {
         return this.r[register];
     }
 
-    // Write register
+    // Direct register write for better performance
     wr(register, value) {
         this.r[register] = value;
     }
@@ -269,6 +346,11 @@ export class CPU {
     
     pause() {
         this.isPaused = true;
+        if (this.rafId) {
+            cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+        }
+        
         if (this.gameboy.debugger) {
             this.gameboy.debugger.log('CPU paused');
         }
@@ -277,28 +359,38 @@ export class CPU {
     unpause() {
         if (this.isPaused) {
             this.isPaused = false;
-            this.frame();
+            this.lastFrameTime = performance.now();
+            this.rafId = requestAnimationFrame(this.frameRaf.bind(this));
+            
             if (this.gameboy.debugger) {
                 this.gameboy.debugger.log('CPU unpaused');
             }
         }
     }
 
-    // Look for interrupt flags
+    // Optimized interrupt handling
     checkInterrupt() {
         if (!this.IME) {
             return;
         }
-        for (var i = 0; i < 5; i++) {
-            var IFval = this.memory.rb(0xFF0F);
-            if ((IFval & (1 << i)) && this.isInterruptEnable(i)) {
-                IFval &= (0xFF - (1<<i));
-                this.memory.wb(0xFF0F, IFval);
+        
+        const IFval = this.memory.rb(0xFF0F);
+        if (IFval === 0) return; // Quick exit if no interrupts pending
+        
+        const IEval = this.memory.rb(0xFFFF);
+        const activeInterrupts = IFval & IEval;
+        if (activeInterrupts === 0) return; // No enabled interrupts pending
+        
+        // Find the highest priority interrupt (lowest bit position)
+        for (let i = 0; i < 5; i++) {
+            if (activeInterrupts & (1 << i)) {
+                // Clear the interrupt flag
+                this.memory.wb(0xFF0F, IFval & ~(1 << i));
                 this.disableInterrupts();
                 this.clock.c += 4; // 20 clocks to serve interrupt, with 16 for RSTn
                 CPU.interruptRoutines[i](this);
                 
-                if (this.gameboy.debugger) {
+                if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
                     this.gameboy.debugger.log(`Interrupt ${i} serviced`);
                 }
                 break;
@@ -306,32 +398,30 @@ export class CPU {
         }
     }
 
-    // Set an interrupt flag
     requestInterrupt(type) {
-        var IFval = this.memory.rb(0xFF0F);
-        IFval |= (1 << type)
-        this.memory.wb(0xFF0F, IFval);
+        const IFval = this.memory.rb(0xFF0F);
+        this.memory.wb(0xFF0F, IFval | (1 << type));
         this.unhalt();
         
-        if (this.gameboy.debugger) {
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
             this.gameboy.debugger.log(`Interrupt ${type} requested`);
         }
     }
 
     isInterruptEnable(type) {
-        return (this.memory.rb(0xFFFF) & (1 << type)) != 0;
+        return (this.memory.rb(0xFFFF) & (1 << type)) !== 0;
     }
 
     enableInterrupts() {
         this.IME = true;
-        if (this.gameboy.debugger) {
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
             this.gameboy.debugger.log('Interrupts enabled');
         }
     }
     
     disableInterrupts() {
         this.IME = false;
-        if (this.gameboy.debugger) {
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
             this.gameboy.debugger.log('Interrupts disabled');
         }
     }
@@ -343,7 +433,7 @@ export class CPU {
 
     endSerialTransfer() {
         this.enableSerial = 0;
-        var data = this.memory.rb(0xFF01);
+        const data = this.memory.rb(0xFF01);
         this.memory.wb(0xFF02, 0);
         this.serialHandler.out(data);
         this.memory.wb(0xFF01, this.serialHandler.in());
@@ -351,5 +441,30 @@ export class CPU {
 
     resetDivTimer() {
         this.timer.resetDiv();
+    }
+    
+    // New method to control emulation speed
+    setClockSpeed(multiplier) {
+        this.clockMultiplier = Math.max(0.1, Math.min(5.0, multiplier));
+        if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
+            this.gameboy.debugger.log(`Clock speed set to ${this.clockMultiplier}x`);
+        }
+        return this.clockMultiplier;
+    }
+}
+
+// Use a class for CPU registers to improve performance
+class CpuRegisters {
+    constructor() {
+        this.A = 0;
+        this.F = 0;
+        this.B = 0;
+        this.C = 0;
+        this.D = 0;
+        this.E = 0;
+        this.H = 0;
+        this.L = 0;
+        this.pc = 0;
+        this.sp = 0;
     }
 }

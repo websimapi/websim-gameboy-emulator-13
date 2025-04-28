@@ -1,8 +1,8 @@
-// memory.js - Memory, Memory Bank Controllers, and External RAM
+// memory.js - Optimized Memory and MBC implementations
 
 import { UnimplementedException } from './utils.js';
 
-// Memory unit
+// Optimized Memory unit using TypedArrays for better performance
 export class Memory {
     constructor(cpu) {
         this.MEM_SIZE = 65536; // 64KB
@@ -13,10 +13,12 @@ export class Memory {
         this.mbc = null;
         this.cpu = cpu;
         
-        // Initialize array
-        for (let i = 0; i < this.MEM_SIZE; i++) {
-            this[i] = 0;
-        }
+        // Use TypedArray for faster memory access
+        this.ram = new Uint8Array(this.MEM_SIZE);
+        
+        // Cache for frequently accessed memory regions
+        this._cachedRegisters = new Uint8Array(256); // For IO registers 0xFF00-0xFFFF
+        this._dirtyRegisterMap = new Uint8Array(256); // Track which registers need synchronizing
     }
 
     static get addresses() {
@@ -35,92 +37,139 @@ export class Memory {
     }
 
     reset() {
-        this.length = this.MEM_SIZE;
-        for (var i = Memory.addresses.VRAM_START; i <= Memory.addresses.VRAM_END; i++) {
-            this[i] = 0;
-        }
-        for (var i = Memory.addresses.DEVICE_START; i <= Memory.addresses.DEVICE_END; i++) {
-            this[i] = 0;
-        }
-        this[0xFFFF] = 0;
+        // Clear main RAM and cache
+        this.ram.fill(0, Memory.addresses.VRAM_START, Memory.addresses.VRAM_END + 1);
+        this.ram.fill(0, Memory.addresses.DEVICE_START, Memory.addresses.DEVICE_END + 1);
+        this.ram[0xFFFF] = 0;
+        
+        this._cachedRegisters.fill(0);
+        this._dirtyRegisterMap.fill(0);
     }
 
     setRomData(data) {
         this.rom = data;
         this.loadRomBank(0);
-        this.mbc = MBC.getMbcInstance(this, this[0x147]);
+        this.mbc = MBC.getMbcInstance(this, this.rom[0x147]);
         this.loadRomBank(1);
         this.mbc.loadRam(this.cpu.getGameName(), this.cpu.getRamSize());
     }
 
     loadRomBank(index) {
-        var start = index ? 0x4000 : 0x0;
-        var romStart = index * 0x4000;
-        for (var i = 0; i < this.banksize; i++) {
-            this[i + start] = this.rom[romStart + i];
+        const start = index ? 0x4000 : 0x0;
+        const romStart = index * 0x4000;
+        
+        // Check for ROM array bounds safety
+        if (romStart + this.banksize > this.rom.length) {
+            throw new Error(`ROM bank ${index} is out of bounds. ROM size: ${this.rom.length}, requested: ${romStart + this.banksize}`);
         }
+        
+        // Use set method for TypedArray for faster copying
+        this.ram.set(this.rom.subarray(romStart, romStart + this.banksize), start);
     }
 
-    // Video ram accessor
+    // Optimized Video RAM accessor
     vram(address) {
         if (address < Memory.addresses.VRAM_START || address > Memory.addresses.VRAM_END) {
-            throw 'VRAM access in out of bounds address ' + address;
+            throw new Error('VRAM access in out of bounds address ' + address);
         }
 
-        return this[address];
+        return this.ram[address];
     }
 
-    // OAM ram accessor
+    // Optimized OAM RAM accessor
     oamram(address) {
         if (address < Memory.addresses.OAM_START || address > Memory.addresses.OAM_END) {
-            throw 'OAMRAM access in out of bounds address ' + address;
+            throw new Error('OAMRAM access in out of bounds address ' + address);
         }
 
-        return this[address];
+        return this.ram[address];
     }
 
-    // Device ram accessor
+    // Optimized device RAM accessor
     deviceram(address, value) {
         if (address < Memory.addresses.DEVICERAM_START || address > Memory.addresses.DEVICERAM_END) {
-            throw 'Device RAM access in out of bounds address ' + address;
+            throw new Error('Device RAM access in out of bounds address ' + address);
         }
-        if (typeof value === "undefined") {
-            return this[address];
+        
+        const cacheIndex = address - Memory.addresses.DEVICERAM_START;
+        
+        if (value === undefined) {
+            // Sync from cache if dirty
+            if (this._dirtyRegisterMap[cacheIndex]) {
+                this.ram[address] = this._cachedRegisters[cacheIndex];
+                this._dirtyRegisterMap[cacheIndex] = 0;
+            }
+            return this.ram[address];
         } else {
-            this[address] = value;
+            this.ram[address] = value;
+            this._cachedRegisters[cacheIndex] = value;
+            this._dirtyRegisterMap[cacheIndex] = 0; // Not dirty since we're writing directly
         }
     }
 
-    // Memory read proxy function
-    // Used to centralize memory read access
+    // Optimized memory read proxy function
     rb(addr) {
-        if (addr >= 0xFF10 && addr < 0xFF40) {
-            var mask = apuMask[addr - 0xFF10];
-            return this[addr] | mask;
+        // Fast paths for common memory regions
+        if (addr < 0x8000) {
+            // ROM area - directly read from RAM array
+            return this.ram[addr];
         }
+        
+        if (addr >= 0xFF00 && addr <= 0xFF7F) {
+            // IO registers - read from cache if available
+            const cacheIndex = addr - 0xFF00;
+            // Sync from cache if dirty
+            if (this._dirtyRegisterMap[cacheIndex]) {
+                this.ram[addr] = this._cachedRegisters[cacheIndex];
+                this._dirtyRegisterMap[cacheIndex] = 0;
+            }
+            return this.ram[addr];
+        }
+        
+        if (addr >= 0xFF10 && addr < 0xFF40) {
+            // Audio registers with masks
+            const mask = APU_MASKS[addr - 0xFF10];
+            return this.ram[addr] | mask;
+        }
+        
         if ((addr >= 0xA000 && addr < 0xC000)) {
+            // External RAM handled by MBC
             return this.mbc.readRam(addr);
         }
-        return this[addr];
+        
+        // Default case - direct RAM access
+        return this.ram[addr];
     }
 
-    // Memory write proxy function
-    // Used to centralize memory writes and delegate specific behaviour
-    // to the correct units
+    // Optimized memory write proxy function
     wb(addr, value) {
-        if (addr < 0x8000 || (addr >= 0xA000 && addr < 0xC000)) { // MBC
+        if (addr < 0x8000 || (addr >= 0xA000 && addr < 0xC000)) { 
+            // MBC area
             this.mbc.manageWrite(addr, value);
-        } else if (addr >= 0xFF10 && addr <= 0xFF3F) { // sound registers
+        } else if (addr >= 0xFF10 && addr <= 0xFF3F) { 
+            // Sound registers
             this.cpu.apu.manageWrite(addr, value);
-        } else if (addr == 0xFF00) { // input register
-            this[addr] = ((this[addr] & 0x0F) | (value & 0x30));
+        } else if (addr == 0xFF00) { 
+            // Input register - preserve joypad state
+            this.ram[addr] = ((this.ram[addr] & 0x0F) | (value & 0x30));
+            
+            // Update cache
+            const cacheIndex = addr - 0xFF00;
+            this._cachedRegisters[cacheIndex] = this.ram[addr];
         } else {
-            this[addr] = value;
+            // Default case - direct write
+            this.ram[addr] = value;
+            
+            // Update cache for IO registers
+            if (addr >= 0xFF00 && addr <= 0xFF7F) {
+                const cacheIndex = addr - 0xFF00;
+                this._cachedRegisters[cacheIndex] = value;
+            }
+            
+            // Special handling for certain addresses
             if ((addr & 0xFF00) == 0xFF00) {
-                if (addr == 0xFF02) {
-                    if (value & 0x80) {
-                        this.cpu.enableSerialTransfer();
-                    }
+                if (addr == 0xFF02 && (value & 0x80)) {
+                    this.cpu.enableSerialTransfer();
                 }
                 if (addr == 0xFF04) {
                     this.cpu.resetDivTimer();
@@ -132,17 +181,18 @@ export class Memory {
         }
     }
 
-    // Start a DMA transfer (OAM data from cartrige to RAM)
+    // Optimized DMA transfer
     dmaTransfer(startAddressPrefix) {
-        var startAddress = (startAddressPrefix << 8);
-        for (var i = 0; i < 0xA0; i++) {
-            this[Memory.addresses.OAM_START + i] = this[startAddress + i];
-        }
+        const startAddress = (startAddressPrefix << 8);
+        
+        // Use TypedArray.set for better performance
+        const sourceData = this.ram.subarray(startAddress, startAddress + 0xA0);
+        this.ram.set(sourceData, Memory.addresses.OAM_START);
     }
 }
 
-// Bitmasks for audio addresses reads
-const apuMask = [
+// Pre-computed masks for audio registers for faster access
+const APU_MASKS = [
     0x80,0x3F,0x00,0xFF,0xBF, // NR10-NR15
     0xFF,0x3F,0x00,0xFF,0xBF, // NR20-NR25
     0x7F,0xFF,0x9F,0xFF,0xBF, // NR30-NR35
@@ -153,28 +203,37 @@ const apuMask = [
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
 ];
 
-// Object for mapping the cartridge RAM
+// Optimized ExtRam using TypedArray
 export class ExtRam {
     constructor() {
-        this.extRam = null;
         this.ramSize = 0;
         this.ramBank = 0;
+        this.gameName = '';
     }
 
     loadRam(game, size) {
         this.gameName = game;
-
         this.ramSize = size;
         this.ramBanksize = this.ramSize >= 0x2000 ? 8192 : 2048;
 
-        var key = this.getStorageKey();
-        var data = localStorage.getItem(key);
-        if (data == null) {
-            this.extRam = Array.apply(null, new Array(this.ramSize)).map(function(){return 0;});
+        const key = this.getStorageKey();
+        let data = localStorage.getItem(key);
+        
+        // Use TypedArray for better performance
+        if (!data) {
+            this.extRam = new Uint8Array(this.ramSize);
         } else {
-            this.extRam = JSON.parse(data);
-            if (this.extRam.length != size) {
-                console.error('Found RAM data but not matching expected size.');
+            try {
+                const dataArray = JSON.parse(data);
+                this.extRam = new Uint8Array(dataArray);
+                
+                if (this.extRam.length != size) {
+                    console.error('Found RAM data but not matching expected size. Resetting.');
+                    this.extRam = new Uint8Array(this.ramSize);
+                }
+            } catch (e) {
+                console.error('Error parsing RAM data:', e);
+                this.extRam = new Uint8Array(this.ramSize);
             }
         }
     }
@@ -184,24 +243,40 @@ export class ExtRam {
     }
 
     manageWrite(offset, value) {
-        this.extRam[this.ramBank * 8192 + offset] = value;
+        if (offset >= 0 && this.ramBank * 8192 + offset < this.extRam.length) {
+            this.extRam[this.ramBank * 8192 + offset] = value;
+        }
     }
 
     manageRead(offset) {
-        return this.extRam[this.ramBank * 8192 + offset];
+        if (offset >= 0 && this.ramBank * 8192 + offset < this.extRam.length) {
+            return this.extRam[this.ramBank * 8192 + offset];
+        }
+        return 0xFF; // Default to 0xFF for invalid read
     }
 
     getStorageKey() {
-        return this.gameName + '_EXTRAM';;
+        return this.gameName + '_EXTRAM';
     }
     
-    // Actually save the RAM in the physical storage (localStorage)
+    // Save RAM with throttling to avoid frequent writes
     saveRamData() {
-        localStorage.setItem(this.getStorageKey(), JSON.stringify(this.extRam));
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
+        }
+        
+        // Debounce save operations to avoid frequent localStorage writes
+        this.saveTimeout = setTimeout(() => {
+            try {
+                localStorage.setItem(this.getStorageKey(), JSON.stringify(Array.from(this.extRam)));
+            } catch (e) {
+                console.error('Error saving RAM data:', e);
+            }
+        }, 500);
     }
 }
 
-// Memory bank controllers
+// Memory bank controllers factory
 export class MBC {
     // Create an MBC instance depending on the type specified in the cartridge
     static getMbcInstance(memory, type) {
@@ -220,7 +295,7 @@ export class MBC {
                 instance = new MBC5(memory);
                 break;
             default:
-                throw new UnimplementedException('MBC type not supported');
+                throw new UnimplementedException('MBC type not supported: ' + type.toString(16));
         }
 
         return instance;

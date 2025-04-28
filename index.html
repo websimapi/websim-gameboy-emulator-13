@@ -3,142 +3,7 @@
 <head>
     <meta charset="utf8"/>
     <title>Gameboy emulator</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 20px;
-            background-color: #222;
-            font-family: sans-serif;
-            color: white;
-        }
-        #container {
-            max-width: 800px;
-            margin: 0 auto;
-        }
-        .canvas-container {
-            background-color: #111;
-            padding: 20px;
-            display: inline-block;
-        }
-        canvas {
-            background-color: #c0c0c0;
-            display: block;
-        }
-        .hide {
-            display: none;
-        }
-        .commands {
-            margin: 10px 0;
-        }
-        #error {
-            color: #f55;
-            font-weight: bold;
-            padding: 10px;
-            background-color: rgba(255, 0, 0, 0.1);
-            border-left: 3px solid #f55;
-            margin: 10px 0;
-        }
-        .rom-section {
-            margin: 20px 0;
-            display: flex;
-        }
-        #rom-file, #rom-drop {
-            flex: 1;
-            padding: 10px;
-        }
-        #dropzone {
-            border: 2px dashed #666;
-            padding: 20px;
-            text-align: center;
-            background-color: #333;
-        }
-        .drag-active {
-            background-color: #444 !important;
-        }
-        table {
-            border-collapse: collapse;
-            margin: 10px 0;
-        }
-        th, td {
-            border: 1px solid #444;
-            padding: 5px 10px;
-        }
-        footer {
-            margin-top: 40px;
-            color: #777;
-        }
-        a {
-            color: #999;
-        }
-        #audio-permission {
-            background-color: #555;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 10px 0;
-            text-align: center;
-        }
-        #audio-permission button {
-            background-color: #4CAF50;
-            border: none;
-            color: white;
-            padding: 10px 15px;
-            text-align: center;
-            text-decoration: none;
-            display: inline-block;
-            font-size: 16px;
-            margin: 10px 0;
-            cursor: pointer;
-            border-radius: 4px;
-        }
-        .toggle-container {
-            margin: 15px 0;
-            padding: 10px;
-            background-color: #444;
-            border-radius: 5px;
-            display: flex;
-            align-items: center;
-        }
-        .toggle-switch {
-            position: relative;
-            display: inline-block;
-            width: 60px;
-            height: 34px;
-            margin-right: 10px;
-        }
-        .toggle-switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #ccc;
-            transition: .4s;
-            border-radius: 34px;
-        }
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 26px;
-            width: 26px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
-        }
-        input:checked + .slider {
-            background-color: #2196F3;
-        }
-        input:checked + .slider:before {
-            transform: translateX(26px);
-        }
-    </style>
+    <link rel="stylesheet" href="styles.css">
     
     <!-- New implementation import map -->
     <script id="importmap-script" type="importmap">
@@ -193,13 +58,19 @@
 
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
 
-<p class="commands">
+<div class="commands">
     <button onclick="g.pause(true);">Pause</button>
     <button onclick="g.pause(false);">Run</button>
     <button id="debug-toggle" onclick="toggleDebugMode();">Debug Mode</button>
-</p>
+</div>
+
+<div class="speed-controls">
+    <label for="emulation-speed">Emulation Speed: <span id="speed-value">1.0x</span></label>
+    <input type="range" id="emulation-speed" min="0.5" max="2" step="0.1" value="1.0">
+</div>
+
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound</label>
 </p>
 <p class="commands">
     <label>
@@ -247,11 +118,13 @@
     </table>
 </div>
 
+<div class="performance-indicator" id="performance-display"></div>
+
 <footer>by <a href="https://github.com/juchi">@Juchi</a> | Follow me on <a href="https://twitter.com/j_chichignoud">Twitter</a></footer>
 
 </div>
 
-<!-- Implementation Toggle Script -->
+<!-- Implementation Toggle Script with performance monitoring -->
 <script>
 // Check localStorage or default to refactored implementation
 const useOriginal = localStorage.getItem('useOriginalImplementation') === 'true';
@@ -276,6 +149,52 @@ function toggleDebugMode() {
     }
 }
 
+// Emulation speed control
+function updateEmulationSpeed() {
+    if (g) {
+        const speedSlider = document.getElementById('emulation-speed');
+        const speed = parseFloat(speedSlider.value);
+        g.setSpeed(speed);
+        document.getElementById('speed-value').textContent = speed.toFixed(1) + 'x';
+    }
+}
+
+// Performance monitoring
+let lastTime = performance.now();
+let frames = 0;
+let fps = 60;
+
+function updatePerformanceDisplay() {
+    const now = performance.now();
+    const elapsed = now - lastTime;
+    
+    // Update once per second
+    if (elapsed >= 1000) {
+        fps = (frames * 1000) / elapsed;
+        frames = 0;
+        lastTime = now;
+        
+        const display = document.getElementById('performance-display');
+        if (display) {
+            // Display FPS and also show info from CPU if available
+            let info = `FPS: ${fps.toFixed(1)}`;
+            if (g && g.cpu) {
+                info += ` | Instructions: ${g.cpu.totalInstructions}`;
+                if (g.cpu.currentFps) {
+                    info += ` | CPU: ${g.cpu.currentFps.toFixed(1)}fps`;
+                }
+            }
+            display.textContent = info;
+        }
+    }
+    
+    frames++;
+    requestAnimationFrame(updatePerformanceDisplay);
+}
+
+// Start performance monitoring
+requestAnimationFrame(updatePerformanceDisplay);
+
 // Load the appropriate implementation
 if (useOriginal) {
     // Load original implementation
@@ -294,6 +213,9 @@ if (useOriginal) {
         window.g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
         g.setSoundEnabled(document.getElementById('sound-enable').checked);
         g.setScreenZoom(document.getElementById('screen-zoom').value);
+        
+        // Set up speed control
+        document.getElementById('emulation-speed').addEventListener('input', updateEmulationSpeed);
     };
     document.body.appendChild(script);
 } else {
@@ -312,7 +234,10 @@ if (useOriginal) {
         function initAudio() {
             try {
                 window.AudioContext = window.AudioContext || window.webkitAudioContext;
-                audioContext = new AudioContext();
+                audioContext = new AudioContext({
+                    latencyHint: 'interactive',
+                    sampleRate: 44100
+                });
                 
                 // If audio context is suspended (needs user interaction)
                 if (audioContext.state === 'suspended') {
@@ -343,11 +268,16 @@ if (useOriginal) {
                     new GameboyJS.RomFileReader(),
                     new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
                 ],
-                debugMode: false // Default to disabled
+                debugMode: false, // Default to disabled
+                useWebGL: true,   // Use WebGL when available
+                enableFrameSkipping: true // Enable frame skipping for better performance
             };
             window.g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
             g.setSoundEnabled(document.getElementById('sound-enable').checked);
             g.setScreenZoom(document.getElementById('screen-zoom').value);
+            
+            // Set up speed control
+            document.getElementById('emulation-speed').addEventListener('input', updateEmulationSpeed);
         }
 
         // When document is loaded, initialize the Audio

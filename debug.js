@@ -1,4 +1,4 @@
-// debug.js - Optimized debugging tools for GameboyJS
+// debug.js - Optimized debugging system
 
 export class DebugSystem {
   constructor(gameboy) {
@@ -15,13 +15,23 @@ export class DebugSystem {
     this.maxLogHistory = 100;
     this.paused = false;
     this.stepMode = false;
-    this.lastOpcodes = new Array(10).fill({address: 0, opcode: 0});
+    
+    // Use a ring buffer for opcodes to avoid constant array shifts
+    this.opcodeHistorySize = 10;
+    this.opcodeHistory = new Array(this.opcodeHistorySize);
+    this.opcodeHistoryIndex = 0;
     
     // Performance optimizations
     this.throttleInterval = 250; // Update UI every 250ms instead of every frame
     this.lastUIUpdate = 0;
     this.uiUpdateScheduled = false;
     this.performanceMode = true; // Default to performance-focused debugging
+    
+    // Use Map for breakpoints for faster lookup
+    this.breakpointMap = new Map();
+    
+    // Cached DOM elements
+    this.domElements = {};
     
     this.createDebugUI();
   }
@@ -32,7 +42,7 @@ export class DebugSystem {
       const debugPanel = document.createElement('div');
       debugPanel.id = 'debug-panel';
       debugPanel.className = 'debug-panel';
-      debugPanel.style.display = this.enabled ? 'block' : 'none';
+      debugPanel.style.display = 'none'; // Start hidden
       
       // Add content to debug panel
       debugPanel.innerHTML = `
@@ -79,131 +89,21 @@ export class DebugSystem {
       
       document.body.appendChild(debugPanel);
       this.attachDebugEvents();
+      
+      // Cache DOM elements for faster access
+      this.cacheElements();
     }
-
-    // Add CSS for debug panel
-    if (!document.getElementById('debug-styles')) {
-      const styleSheet = document.createElement('style');
-      styleSheet.id = 'debug-styles';
-      styleSheet.textContent = `
-        .debug-panel {
-          position: fixed;
-          top: 0;
-          right: 0;
-          width: 400px;
-          height: 100%;
-          background-color: rgba(34, 34, 34, 0.95);
-          color: #eee;
-          overflow-y: auto;
-          font-family: monospace;
-          z-index: 1000;
-          padding: 10px;
-          box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5);
-        }
-        
-        .debug-header {
-          border-bottom: 1px solid #555;
-          padding-bottom: 10px;
-          margin-bottom: 10px;
-        }
-        
-        .debug-controls {
-          display: flex;
-          gap: 5px;
-          margin-top: 10px;
-        }
-        
-        .debug-body {
-          display: flex;
-          flex-direction: column;
-          gap: 15px;
-        }
-        
-        .debug-section {
-          border: 1px solid #444;
-          border-radius: 5px;
-          padding: 10px;
-          background-color: #333;
-        }
-        
-        .debug-section h4 {
-          margin-top: 0;
-          border-bottom: 1px solid #555;
-          padding-bottom: 5px;
-          margin-bottom: 10px;
-        }
-        
-        .memory-row {
-          display: flex;
-          gap: 5px;
-          padding: 2px 0;
-        }
-        
-        .memory-header {
-          font-weight: bold;
-          border-bottom: 1px solid #555;
-          padding-bottom: 5px;
-          margin-bottom: 5px;
-        }
-        
-        .memory-ascii {
-          margin-left: 10px;
-          font-family: monospace;
-        }
-        
-        #cpu-registers {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 5px;
-        }
-        
-        #opcode-history {
-          max-height: 150px;
-          overflow-y: auto;
-        }
-        
-        #debug-log {
-          max-height: 200px;
-          overflow-y: auto;
-          font-size: 12px;
-        }
-        
-        .breakpoint-item {
-          display: flex;
-          justify-content: space-between;
-          margin: 5px 0;
-        }
-        
-        .debug-panel input[type="text"] {
-          background-color: #444;
-          border: 1px solid #555;
-          color: #fff;
-          padding: 5px;
-          margin-right: 5px;
-        }
-        
-        .debug-panel button {
-          background-color: #555;
-          border: none;
-          color: #fff;
-          padding: 5px 10px;
-          cursor: pointer;
-          border-radius: 3px;
-        }
-        
-        .debug-panel button:hover {
-          background-color: #666;
-        }
-        
-        .error-details {
-          background-color: #500;
-          border: 1px solid #f00;
-          border-radius: 5px;
-          padding: 10px;
-          margin-top: 20px;
-        }
-      `;
-      document.head.appendChild(styleSheet);
+  }
+  
+  // Cache frequently accessed DOM elements
+  cacheElements() {
+    const elements = [
+      'debug-panel', 'cpu-registers', 'performance-metrics', 
+      'opcode-history', 'memory-display', 'breakpoint-list', 'debug-log'
+    ];
+    
+    for (const id of elements) {
+      this.domElements[id] = document.getElementById(id);
     }
   }
 
@@ -261,7 +161,7 @@ export class DebugSystem {
 
   toggle() {
     this.enabled = !this.enabled;
-    const debugPanel = document.getElementById('debug-panel');
+    const debugPanel = this.domElements['debug-panel'];
     if (debugPanel) {
       debugPanel.style.display = this.enabled ? 'block' : 'none';
     }
@@ -297,16 +197,20 @@ export class DebugSystem {
 
   addBreakpoint(address) {
     this.breakpoints.add(address);
+    this.breakpointMap.set(address, true);
     this.log(`Breakpoint added at 0x${address.toString(16)}`);
   }
 
   removeBreakpoint(address) {
     this.breakpoints.delete(address);
+    this.breakpointMap.delete(address);
     this.log(`Breakpoint removed from 0x${address.toString(16)}`);
   }
 
+  // Optimized breakpoint checking
   checkBreakpoint(address) {
-    if (this.breakpoints.has(address)) {
+    // Use Map for fast lookup
+    if (this.breakpointMap.has(address)) {
       this.pauseExecution();
       this.log(`Breakpoint hit at 0x${address.toString(16)}`);
       return true;
@@ -317,9 +221,13 @@ export class DebugSystem {
   updateBreakpointDisplay() {
     if (!this.enabled) return;
     
-    const bpList = document.getElementById('breakpoint-list');
+    const bpList = this.domElements['breakpoint-list'];
     if (bpList) {
       bpList.innerHTML = '';
+      
+      // Create document fragment for better performance
+      const fragment = document.createDocumentFragment();
+      
       for (const bp of this.breakpoints) {
         const bpElement = document.createElement('div');
         bpElement.className = 'breakpoint-item';
@@ -333,11 +241,14 @@ export class DebugSystem {
         });
         
         bpElement.appendChild(removeBtn);
-        bpList.appendChild(bpElement);
+        fragment.appendChild(bpElement);
       }
+      
+      bpList.appendChild(fragment);
     }
   }
 
+  // Optimized opcode recording using ring buffer
   recordOpcode(address, opcode) {
     if (!this.enabled) return;
     
@@ -346,92 +257,104 @@ export class DebugSystem {
     
     // Only track opcode history if not in performance mode
     if (!this.performanceMode) {
-      this.lastOpcodes.shift();
-      this.lastOpcodes.push({ address, opcode });
+      this.opcodeHistory[this.opcodeHistoryIndex] = { address, opcode };
+      this.opcodeHistoryIndex = (this.opcodeHistoryIndex + 1) % this.opcodeHistorySize;
     }
   }
 
   updatePerformanceMetrics() {
     if (!this.enabled) return;
     
-    const now = performance.now();
-    const elapsed = now - this.metrics.lastFrameTime;
-    this.metrics.lastFrameTime = now;
+    const cpu = this.gameboy.cpu;
     
-    this.metrics.frameTime.push(elapsed);
-    if (this.metrics.frameTime.length > 60) {
+    // Update metrics based on CPU data
+    this.metrics.frameTime.push(cpu.currentFps);
+    if (this.metrics.frameTime.length > 10) {
       this.metrics.frameTime.shift();
     }
     
-    // Calculate average FPS from the last 60 frames
-    const avgFrameTime = this.metrics.frameTime.reduce((a, b) => a + b, 0) / this.metrics.frameTime.length;
-    this.metrics.avgFps = 1000 / avgFrameTime;
+    // Calculate average FPS
+    this.metrics.avgFps = this.metrics.frameTime.reduce((a, b) => a + b, 0) / this.metrics.frameTime.length;
   }
 
+  // Optimized memory display
   displayMemory(address) {
     if (!this.enabled || this.performanceMode) return;
     
     address = address & 0xFFF0; // Align to 16-byte boundary
-    const memDisplay = document.getElementById('memory-display');
-    if (memDisplay) {
-      let html = '<div class="memory-row memory-header">';
-      html += '<span>Address</span>';
-      for (let i = 0; i < 16; i++) {
-        html += `<span>+${i.toString(16)}</span>`;
-      }
-      html += '<span>ASCII</span></div>';
-      
-      for (let row = 0; row < 8; row++) {
-        const rowAddr = address + (row * 16);
-        html += `<div class="memory-row"><span>0x${rowAddr.toString(16).padStart(4, '0')}</span>`;
-        
-        let asciiRow = '';
-        for (let col = 0; col < 16; col++) {
-          const byteAddr = rowAddr + col;
-          const byteValue = this.gameboy.cpu.memory.rb(byteAddr);
-          html += `<span>0x${byteValue.toString(16).padStart(2, '0')}</span>`;
-          
-          // Add to ASCII representation
-          asciiRow += byteValue >= 32 && byteValue <= 126 ? String.fromCharCode(byteValue) : '.';
-        }
-        
-        html += `<span class="memory-ascii">${asciiRow}</span></div>`;
-      }
-      
-      memDisplay.innerHTML = html;
+    const memDisplay = this.domElements['memory-display'];
+    if (!memDisplay) return;
+    
+    // Use template strings for faster HTML construction
+    let html = '<div class="memory-row memory-header">';
+    html += '<span>Address</span>';
+    for (let i = 0; i < 16; i++) {
+      html += `<span>+${i.toString(16)}</span>`;
     }
+    html += '<span>ASCII</span></div>';
+    
+    // Pre-allocate for ASCII representation
+    const asciiChars = new Array(16);
+    
+    for (let row = 0; row < 8; row++) {
+      const rowAddr = address + (row * 16);
+      html += `<div class="memory-row"><span>0x${rowAddr.toString(16).padStart(4, '0')}</span>`;
+      
+      for (let col = 0; col < 16; col++) {
+        const byteAddr = rowAddr + col;
+        const byteValue = this.gameboy.cpu.memory.rb(byteAddr);
+        html += `<span>0x${byteValue.toString(16).padStart(2, '0')}</span>`;
+        
+        // Add to ASCII representation
+        asciiChars[col] = byteValue >= 32 && byteValue <= 126 ? String.fromCharCode(byteValue) : '.';
+      }
+      
+      html += `<span class="memory-ascii">${asciiChars.join('')}</span></div>`;
+    }
+    
+    memDisplay.innerHTML = html;
   }
 
+  // Optimized register display
   updateRegistersDisplay() {
     if (!this.enabled) return;
     
-    const regDisplay = document.getElementById('cpu-registers');
-    if (regDisplay) {
-      const cpu = this.gameboy.cpu;
-      regDisplay.innerHTML = `
-        <div>A: 0x${cpu.r.A.toString(16).padStart(2, '0')} | F: 0x${cpu.r.F.toString(16).padStart(2, '0')}</div>
-        <div>B: 0x${cpu.r.B.toString(16).padStart(2, '0')} | C: 0x${cpu.r.C.toString(16).padStart(2, '0')}</div>
-        <div>D: 0x${cpu.r.D.toString(16).padStart(2, '0')} | E: 0x${cpu.r.E.toString(16).padStart(2, '0')}</div>
-        <div>H: 0x${cpu.r.H.toString(16).padStart(2, '0')} | L: 0x${cpu.r.L.toString(16).padStart(2, '0')}</div>
-        <div>PC: 0x${cpu.r.pc.toString(16).padStart(4, '0')} | SP: 0x${cpu.r.sp.toString(16).padStart(4, '0')}</div>
-        <div>IME: ${cpu.IME ? 'Enabled' : 'Disabled'} | Halted: ${cpu.isHalted ? 'Yes' : 'No'}</div>
-      `;
-    }
+    const regDisplay = this.domElements['cpu-registers'];
+    if (!regDisplay) return;
+    
+    const cpu = this.gameboy.cpu;
+    const r = cpu.r;
+    
+    // Use template strings for better performance
+    regDisplay.innerHTML = `
+      <div>A: 0x${r.A.toString(16).padStart(2, '0')} | F: 0x${r.F.toString(16).padStart(2, '0')}</div>
+      <div>B: 0x${r.B.toString(16).padStart(2, '0')} | C: 0x${r.C.toString(16).padStart(2, '0')}</div>
+      <div>D: 0x${r.D.toString(16).padStart(2, '0')} | E: 0x${r.E.toString(16).padStart(2, '0')}</div>
+      <div>H: 0x${r.H.toString(16).padStart(2, '0')} | L: 0x${r.L.toString(16).padStart(2, '0')}</div>
+      <div>PC: 0x${r.pc.toString(16).padStart(4, '0')} | SP: 0x${r.sp.toString(16).padStart(4, '0')}</div>
+      <div>IME: ${cpu.IME ? 'Enabled' : 'Disabled'} | Halted: ${cpu.isHalted ? 'Yes' : 'No'}</div>
+    `;
   }
 
+  // Optimized opcode history display
   updateOpcodeHistory() {
     if (!this.enabled || this.performanceMode) return;
     
-    const historyDisplay = document.getElementById('opcode-history');
-    if (historyDisplay) {
-      let html = '';
-      for (const entry of this.lastOpcodes) {
-        if (entry.address) {
-          html += `<div>0x${entry.address.toString(16).padStart(4, '0')}: 0x${entry.opcode.toString(16).padStart(2, '0')}</div>`;
-        }
+    const historyDisplay = this.domElements['opcode-history'];
+    if (!historyDisplay) return;
+    
+    let html = '';
+    
+    // Iterate through the ring buffer in the correct order
+    for (let i = 0; i < this.opcodeHistorySize; i++) {
+      const index = (this.opcodeHistoryIndex + i) % this.opcodeHistorySize;
+      const entry = this.opcodeHistory[index];
+      if (entry && entry.address) {
+        html += `<div>0x${entry.address.toString(16).padStart(4, '0')}: 0x${entry.opcode.toString(16).padStart(2, '0')}</div>`;
       }
-      historyDisplay.innerHTML = html;
     }
+    
+    historyDisplay.innerHTML = html;
   }
 
   log(message) {
@@ -440,33 +363,44 @@ export class DebugSystem {
       message
     };
     
-    this.logHistory.push(logEntry);
+    // Use unshift for better performance than push+shift
+    this.logHistory.unshift(logEntry);
     if (this.logHistory.length > this.maxLogHistory) {
-      this.logHistory.shift();
+      this.logHistory.length = this.maxLogHistory;
     }
     
     if (this.enabled) {
       this.updateLogDisplay();
     }
     
-    console.log(`[DEBUG] ${message}`);
+    // Only log to console in development/debugging
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[DEBUG] ${message}`);
+    }
   }
 
   updateLogDisplay() {
     if (!this.enabled) return;
     
-    const logDisplay = document.getElementById('debug-log');
-    if (logDisplay) {
-      let html = '';
-      for (const entry of this.logHistory) {
-        const timeString = entry.time.toTimeString().split(' ')[0];
-        html += `<div>[${timeString}] ${entry.message}</div>`;
-      }
-      logDisplay.innerHTML = html;
-      
-      // Auto-scroll to bottom
-      logDisplay.scrollTop = logDisplay.scrollHeight;
+    const logDisplay = this.domElements['debug-log'];
+    if (!logDisplay) return;
+    
+    // Generate log content
+    let html = '';
+    
+    // Only show the most recent entries in the UI
+    const displayCount = Math.min(20, this.logHistory.length);
+    
+    for (let i = 0; i < displayCount; i++) {
+      const entry = this.logHistory[i];
+      const timeString = entry.time.toTimeString().split(' ')[0];
+      html += `<div>[${timeString}] ${entry.message}</div>`;
     }
+    
+    logDisplay.innerHTML = html;
+    
+    // Auto-scroll to top (since we're adding at the top)
+    logDisplay.scrollTop = 0;
   }
 
   updateUI(force = false) {
@@ -489,22 +423,31 @@ export class DebugSystem {
     
     this.lastUIUpdate = now;
     
-    // Only update what's necessary based on performance mode
-    this.updateRegistersDisplay();
-    
-    // Update performance metrics display
-    const perfElement = document.getElementById('performance-metrics');
+    // Update performance display first (most important)
+    const perfElement = this.domElements['performance-metrics'];
     if (perfElement) {
-      perfElement.textContent = `FPS: ${this.metrics.avgFps.toFixed(2)} | Instructions: ${this.metrics.instructionCount}`;
+      const cpu = this.gameboy.cpu;
+      perfElement.textContent = `
+        FPS: ${cpu.currentFps.toFixed(2)} | 
+        Avg: ${this.metrics.avgFps.toFixed(2)} | 
+        Instructions: ${this.metrics.instructionCount} |
+        Mode: ${this.performanceMode ? 'Fast' : 'Detailed'}
+      `;
     }
+    
+    // Update CPU registers
+    this.updateRegistersDisplay();
     
     // Heavy updates only if not in performance mode
     if (!this.performanceMode) {
       this.updateOpcodeHistory();
-      this.displayMemory(this.gameboy.cpu.r.pc);
+      // Only update memory display when explicitly requested or after stepping
+      if (force) {
+        this.displayMemory(this.gameboy.cpu.r.pc);
+      }
     }
     
-    // Always update log
+    // Update log display
     this.updateLogDisplay();
   }
 
@@ -513,21 +456,30 @@ export class DebugSystem {
     this.pauseExecution();
     this.updateUI(true); // Force immediate update on errors
     
-    // Show error in UI
-    const errorDetails = document.createElement('div');
-    errorDetails.className = 'error-details';
-    errorDetails.innerHTML = `
-      <h4>Error Details</h4>
-      <div>Type: ${error.name}</div>
-      <div>Message: ${error.message}</div>
-      <div>Context: ${context}</div>
-      <div>Stack: ${error.stack}</div>
-    `;
-    
-    // Add to debug panel
-    const debugPanel = document.getElementById('debug-panel');
-    if (debugPanel) {
-      debugPanel.appendChild(errorDetails);
+    // Only show full error details when not in performance mode
+    if (!this.performanceMode) {
+      // Show error in UI
+      const errorDetails = document.createElement('div');
+      errorDetails.className = 'error-details';
+      errorDetails.innerHTML = `
+        <h4>Error Details</h4>
+        <div>Type: ${error.name}</div>
+        <div>Message: ${error.message}</div>
+        <div>Context: ${context}</div>
+        <div>Stack: ${error.stack}</div>
+      `;
+      
+      // Add to debug panel
+      const debugPanel = this.domElements['debug-panel'];
+      if (debugPanel) {
+        // Remove any existing error details
+        const existingError = debugPanel.querySelector('.error-details');
+        if (existingError) {
+          debugPanel.removeChild(existingError);
+        }
+        
+        debugPanel.appendChild(errorDetails);
+      }
     }
     
     console.error('[DEBUG] Error:', error);

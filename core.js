@@ -1,4 +1,4 @@
-// core.js - Updates for better debugger performance
+// core.js - Optimized core GameBoy emulation
 
 import { Util } from './utils.js';
 import { CPU } from './cpu.js';
@@ -18,47 +18,78 @@ const defaultOptions = {
     statusContainerId: 'status',
     gameNameContainerId: 'game-name',
     errorContainerId: 'error',
-    debugMode: false
+    debugMode: false,
+    useWebGL: true, // Enable WebGL rendering by default
+    enableFrameSkipping: true // Enable frame skipping for performance
 };
 
-// Gameboy class
+// Optimized Gameboy class
 export class Gameboy {
     constructor(canvas, options) {
         options = options || {};
         this.options = Util.extend({}, defaultOptions, options);
 
-        var cpu = new CPU(this);
-        var screen = new Screen(canvas, this.options.zoom);
-        var gpu = new GPU(screen, cpu);
+        // Performance metrics
+        this.performanceMetrics = {
+            fps: 0,
+            frameTime: 0,
+            startTime: performance.now(),
+            frames: 0,
+            lastUpdate: 0
+        };
+        
+        // Flag for monitoring component initialization
+        this.componentsReady = false;
+        
+        // Initialize components
+        this.initializeComponents(canvas);
+        
+        // Initialize ROM handling
+        this.createRom(this.options.romReaders);
+
+        // Initialize UI references
+        this.statusContainer = document.getElementById(this.options.statusContainerId) || document.createElement('div');
+        this.gameNameContainer = document.getElementById(this.options.gameNameContainerId) || document.createElement('div');
+        this.errorContainer = document.getElementById(this.options.errorContainerId) || document.createElement('div');
+        
+        // Mark components as ready
+        this.componentsReady = true;
+    }
+    
+    // Initialize all emulator components
+    initializeComponents(canvas) {
+        // Create CPU first
+        const cpu = new CPU(this);
+        
+        // Create Screen with WebGL support when available
+        const screen = new Screen(canvas, this.options.zoom);
+        
+        // Create GPU
+        const gpu = new GPU(screen, cpu);
         cpu.gpu = gpu;
 
-        // We'll update the keyboard import in input.js to address circular dependency
-        var pad = new this.options.pad.class(this.options.pad.mapping);
-        var input = new Input(cpu, pad);
+        // Create Input handling
+        const pad = new this.options.pad.class(this.options.pad.mapping);
+        const input = new Input(cpu, pad);
         cpu.input = input;
 
+        // Store references
         this.cpu = cpu;
         this.screen = screen;
         this.input = input;
         this.pad = pad;
 
-        // Initialize debugger if enabled, but in performance mode by default
+        // Initialize debugger if enabled
         if (this.options.debugMode) {
             this.debugger = new DebugSystem(this);
         }
-
-        this.createRom(this.options.romReaders);
-
-        this.statusContainer   = document.getElementById(this.options.statusContainerId) || document.createElement('div');
-        this.gameNameContainer = document.getElementById(this.options.gameNameContainerId) || document.createElement('div');
-        this.errorContainer    = document.getElementById(this.options.errorContainerId) || document.createElement('div');
     }
 
-    // Create the ROM object and bind one or more readers
+    // Create the ROM object and bind readers
     createRom(readers) {
         var rom = new Rom(this);
         if (readers.length == 0) {
-            // add the default rom reader
+            // Add the default rom reader
             var romReader = new RomFileReader();
             rom.addReader(romReader);
         } else {
@@ -70,23 +101,44 @@ export class Gameboy {
         }
     }
 
+    // Start running a loaded ROM
     startRom(rom) {
+        // Clear any previous errors
         this.errorContainer.classList.add('hide');
+        
+        // Reset the CPU
         this.cpu.reset();
+        
         try {
+            // Load ROM data into memory
             this.cpu.loadRom(rom.data);
-            this.setStatus('Game Running :');
+            
+            // Update UI status
+            this.setStatus('Game Running:');
             this.setGameName(this.cpu.getGameName());
+            
+            // Initialize performance metrics
+            this.performanceMetrics.startTime = performance.now();
+            this.performanceMetrics.frames = 0;
+            this.performanceMetrics.lastUpdate = performance.now();
+            
+            // Start the CPU
             this.cpu.run();
             
             if (this.debugger) {
                 this.debugger.log(`Game started: ${this.cpu.getGameName()}`);
+            }
+            
+            // Start performance monitoring
+            if (!this.performanceMonitorId) {
+                this.performanceMonitorId = setInterval(() => this.updatePerformanceMetrics(), 1000);
             }
         } catch (e) {
             this.handleException(e);
         }
     }
 
+    // Pause or unpause emulation
     pause(value) {
         if (value) {
             this.setStatus('Game Paused :');
@@ -97,6 +149,7 @@ export class Gameboy {
         }
     }
     
+    // Toggle debugger on/off
     toggleDebugger() {
         if (this.debugger) {
             const isEnabled = this.debugger.toggle();
@@ -110,9 +163,10 @@ export class Gameboy {
         }
     }
 
+    // Display an error
     error(message) {
         this.setStatus('Error during execution');
-        this.setError('An error occurred during execution:' + message);
+        this.setError('An error occurred during execution: ' + message);
         this.cpu.stop();
         
         if (this.debugger) {
@@ -120,6 +174,7 @@ export class Gameboy {
         }
     }
 
+    // Update status text
     setStatus(status) {
         this.statusContainer.innerHTML = status;
     }
@@ -135,6 +190,7 @@ export class Gameboy {
         this.gameNameContainer.innerHTML = name;
     }
     
+    // Toggle sound on/off
     setSoundEnabled(value) {
         if (value) {
             this.cpu.apu.connect();
@@ -143,10 +199,12 @@ export class Gameboy {
         }
     }
     
+    // Set screen zoom level
     setScreenZoom(value) {
         this.screen.setPixelSize(value);
     }
     
+    // Handle exceptions
     handleException(e) {
         if (this.debugger) {
             this.debugger.handleError(e, 'Gameboy Execution');
@@ -160,6 +218,58 @@ export class Gameboy {
             this.error(e.message || String(e));
             console.error(e);
         }
+    }
+    
+    // Update performance metrics
+    updatePerformanceMetrics() {
+        const now = performance.now();
+        const elapsed = now - this.performanceMetrics.lastUpdate;
+        
+        if (elapsed >= 1000) { // Update once per second
+            this.performanceMetrics.fps = 
+                (this.cpu.frameCount * 1000) / elapsed;
+            
+            this.performanceMetrics.frameTime = 
+                this.cpu.frameCount > 0 ? elapsed / this.cpu.frameCount : 0;
+            
+            // Reset counters
+            this.cpu.frameCount = 0;
+            this.performanceMetrics.lastUpdate = now;
+            
+            // Update debugger if active
+            if (this.debugger && this.debugger.enabled) {
+                this.debugger.updatePerformanceMetrics();
+            }
+        }
+    }
+    
+    // Set emulation speed (1.0 = normal)
+    setSpeed(multiplier) {
+        return this.cpu.setClockSpeed(multiplier);
+    }
+    
+    // Clean up resources when emulator is no longer needed
+    dispose() {
+        // Stop CPU
+        if (this.cpu) {
+            this.cpu.stop();
+        }
+        
+        // Stop performance monitoring
+        if (this.performanceMonitorId) {
+            clearInterval(this.performanceMonitorId);
+            this.performanceMonitorId = null;
+        }
+        
+        // Clean up debugger
+        if (this.debugger && this.debugger.enabled) {
+            this.debugger.toggle();
+        }
+        
+        // Remove any event listeners or other resources
+        // ...
+        
+        console.log('GameBoy emulator resources released');
     }
 }
 
