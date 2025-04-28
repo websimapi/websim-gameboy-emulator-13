@@ -71,22 +71,37 @@
    - Defined input keys
    - Defined CPU interrupts
 
+3. **core.js** - Extracted the core CPU and Gameboy classes
+   - Implemented the main Gameboy class from existing code
+   - Extracted the CPU class with core functionality
+   - Defined CPU operations that will be referenced by opcodes
+   - Resolved circular dependency by making cpuOps part of core.js
+
+4. **utils.js** - Extracted utility functions and serial handlers
+   - Implemented the Util helper functions
+   - Moved exception handling
+   - Moved debug tools
+   - Moved serial port handlers
+
+5. **memory.js** - Extracted memory and MBC management
+   - Implemented the Memory class
+   - Extracted MBC implementations
+   - Extracted ExtRam handling
+
 ## Next Files to Work On
-1. **core.js** - Extract the core CPU and Gameboy classes
-   - Implement the main Gameboy class from existing code
-   - Extract the CPU class with core functionality
-   - Define CPU operations that will be referenced by opcodes
+1. **gpu.js** - Extract GPU implementation
+   - Extract the GPU class
+   - Implement tile and sprite rendering
+   - Implement background and window handling
 
-2. **utils.js** - Extract utility functions and serial handlers
-   - Implement the Util helper functions
-   - Move exception handling
-   - Move debug tools
-   - Move serial port handlers
+2. **screen.js** - Extract screen rendering
+   - Implement the Screen class
+   - Set up canvas manipulation
+   - Handle screen scaling
 
-3. **memory.js** - Extract memory and MBC management
-   - Implement the Memory class
-   - Extract MBC implementations
-   - Extract ExtRam handling
+3. **input.js** - Extract input handling
+   - Implement Input class
+   - Extract Keyboard and Gamepad handlers
 
 ## Implementation Strategy
 - For each module, we'll extract the relevant code from gameboy.js
@@ -94,9 +109,9 @@
 - Update references to use imports instead of assuming global namespace
 - Fix any circular dependencies that arise during the refactoring
 
-## Notes
-- The current implementation relies on importing cpuOps from core.js in constants.js, creating a circular dependency
-- This will need to be resolved by either:
-  1. Moving CPU operations to constants.js
-  2. Restructuring how opcodes access CPU operations
-- We may need to temporarily keep gameboy.js in place as we gradually migrate to the new structure
+## Progress
+- Core functionality has been modularized
+- Basic module system is in place with proper imports/exports
+- Resolved circular dependency between core.js and constants.js
+- HTML has been updated to use ES modules
+- Audio initialization has been improved with permission handling
