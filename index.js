@@ -1,8 +1,8 @@
 // index.js - Main entry point for the GameboyJS emulator
 // This file imports all modules and exports the public API
 
-// Import all modules (these will be created in subsequent steps)
-import { Gameboy } from './core.js';
+// Import all modules
+import { Gameboy, CPU } from './core.js';
 import { Memory, MBC } from './memory.js';
 import { GPU } from './gpu.js';
 import { Screen } from './screen.js';
@@ -11,13 +11,14 @@ import { APU, Channel1, Channel3, Channel4 } from './audio.js';
 import { Timer } from './timer.js';
 import { Rom, RomFileReader, RomDropFileReader, RomAjaxReader } from './rom.js';
 import { Util, Debug, UnimplementedException, ConsoleSerial, DummySerial } from './utils.js';
-import { opcodeMap, opcodeCbmap } from './constants.js';
+import { opcodeMap, opcodeCbmap, MemoryAddresses, ScreenConstants, APURegisters, InputKeys, CPUInterrupts } from './constants.js';
+import { cpuOps } from './cpu-operations.js';
 
 // Create the main GameboyJS namespace to maintain compatibility with existing code
 const GameboyJS = {
   // Core components
   Gameboy,
-  CPU: Gameboy.CPU, // We'll define CPU as part of the Gameboy module
+  CPU,
   
   // Memory
   Memory,
@@ -54,9 +55,17 @@ const GameboyJS = {
   ConsoleSerial,
   DummySerial,
   
-  // OpCode maps
+  // CPU operations
+  cpuOps,
+  
+  // OpCode maps and constants
   opcodeMap,
-  opcodeCbmap
+  opcodeCbmap,
+  MemoryAddresses,
+  ScreenConstants,
+  APURegisters,
+  InputKeys,
+  CPUInterrupts
 };
 
 // Export the namespace as default
@@ -64,7 +73,7 @@ export default GameboyJS;
 
 // Also export individual components for those who prefer named imports
 export {
-  Gameboy,
+  Gameboy, CPU,
   Memory, MBC,
   GPU, Screen,
   Input, Keyboard, Gamepad,
@@ -72,5 +81,7 @@ export {
   Timer,
   Rom, RomFileReader, RomDropFileReader, RomAjaxReader,
   Util, Debug, UnimplementedException, ConsoleSerial, DummySerial,
-  opcodeMap, opcodeCbmap
+  cpuOps,
+  opcodeMap, opcodeCbmap,
+  MemoryAddresses, ScreenConstants, APURegisters, InputKeys, CPUInterrupts
 };

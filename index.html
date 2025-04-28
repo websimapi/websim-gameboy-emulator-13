@@ -153,7 +153,12 @@
         "./timer.js": "./timer.js",
         "./rom.js": "./rom.js",
         "./utils.js": "./utils.js",
-        "./constants.js": "./constants.js"
+        "./constants.js": "./constants.js",
+        "./cpu.js": "./cpu.js",
+        "./cpu-operations.js": "./cpu-operations.js",
+        "./bootrom.js": "./bootrom.js",
+        "./opcodes.js": "./opcodes.js",
+        "./hardware-constants.js": "./hardware-constants.js"
       }
     }
     </script>
@@ -182,16 +187,16 @@
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
 
 <p class="commands">
-    <button onclick="window.g.pause(true);">Pause</button>
-    <button onclick="window.g.pause(false);">Run</button>
+    <button onclick="g.pause(true);">Pause</button>
+    <button onclick="g.pause(false);">Run</button>
 </p>
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="window.g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
 </p>
 <p class="commands">
     <label>
         Screen zoom
-        <select id="screen-zoom" onchange="window.g.setScreenZoom(this.value);">
+        <select id="screen-zoom" onchange="g.setScreenZoom(this.value);">
             <option value="1">1</option>
             <option value="2" selected>2</option>
             <option value="3">3</option>
