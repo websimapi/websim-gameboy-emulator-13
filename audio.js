@@ -35,6 +35,80 @@ export class APU {
         
         // Connect channels to mixers based on initial state
         this.updateChannelConnections();
+        
+        // Register audio worklet for noise generator
+        this.setupAudioWorklets();
+    }
+    
+    async setupAudioWorklets() {
+        try {
+            // Register the noise processor worklet
+            await this.audioContext.audioWorklet.addModule('data:text/javascript;base64,' + btoa(`
+                class NoiseProcessor extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        this.lfsr = 0x7FFF; // 15-bit Linear Feedback Shift Register
+                        this.divRatio = 1;
+                        this.shiftFreq = 0;
+                        this.counterStep = 15; // 7 or 15 bits mode
+                        this.sampleRate = sampleRate;
+                        this.frequency = 1000;
+                        this.sampleCounter = 0;
+                        
+                        this.port.onmessage = (event) => {
+                            if (event.data.type === 'updateParams') {
+                                this.divRatio = event.data.divRatio || 1;
+                                this.shiftFreq = event.data.shiftFreq || 0;
+                                this.counterStep = event.data.counterStep || 15;
+                                this.frequency = event.data.frequency || 1000;
+                            } else if (event.data.type === 'reset') {
+                                this.lfsr = 0x7FFF;
+                            }
+                        };
+                    }
+                    
+                    process(inputs, outputs, parameters) {
+                        const output = outputs[0];
+                        const channel = output[0];
+                        
+                        // Calculate samples per shift based on frequency
+                        const samplesPerShift = this.sampleRate / this.frequency;
+                        
+                        for (let i = 0; i < channel.length; i++) {
+                            this.sampleCounter++;
+                            
+                            if (this.sampleCounter >= samplesPerShift) {
+                                this.sampleCounter -= samplesPerShift;
+                                
+                                // Update LFSR state
+                                const xorResult = ((this.lfsr & 1) ^ ((this.lfsr >> 1) & 1)) & 1;
+                                this.lfsr = (this.lfsr >> 1) | (xorResult << 14);
+                                
+                                // If using 7-bit mode, also apply XOR to bit 6
+                                if (this.counterStep === 7) {
+                                    this.lfsr = (this.lfsr & ~0x40) | (xorResult << 6);
+                                }
+                            }
+                            
+                            // Output the current LFSR state - bit 0 inverted
+                            channel[i] = (this.lfsr & 1) ? -1 : 1;
+                        }
+                        
+                        return true; // Keep processor alive
+                    }
+                }
+                
+                registerProcessor('noise-processor', NoiseProcessor);
+            `));
+            console.log("Noise worklet registered successfully");
+            
+            // If Channel4 is already initialized, update it to use the worklet
+            if (this.channel4) {
+                this.channel4.initNoiseWorklet();
+            }
+        } catch (err) {
+            console.error("Failed to register audio worklet:", err);
+        }
     }
 
     connect() {
@@ -229,6 +303,7 @@ export class APU {
         const envelopeVolume = (value & 0xF0) >> 4;
         this.channel1.setEnvelopeVolume(envelopeVolume);
         this.channel1.envelopeStep = (value & 0x07);
+        this.channel1.envelopeCheck = this.channel1.envelopeStep > 0;
     }
 
     handleChannel1FreqLowWrite(value) {
@@ -260,6 +335,7 @@ export class APU {
         const envelopeVolume = (value & 0xF0) >> 4;
         this.channel2.setEnvelopeVolume(envelopeVolume);
         this.channel2.envelopeStep = (value & 0x07);
+        this.channel2.envelopeCheck = this.channel2.envelopeStep > 0;
     }
 
     handleChannel2FreqLowWrite(value) {
@@ -292,8 +368,17 @@ export class APU {
 
     handleChannel3VolumeWrite(value) {
         const volumeCode = (value >> 5) & 0x3;
-        const volumeShift = volumeCode === 0 ? 4 : (volumeCode - 1);
-        this.channel3.setVolume(volumeCode === 0 ? 0 : (1 / (1 << volumeShift)));
+        let volume = 0;
+        
+        // Volume codes: 0 = mute, 1 = 100%, 2 = 50%, 3 = 25%
+        switch (volumeCode) {
+            case 0: volume = 0; break;
+            case 1: volume = 1.0; break;
+            case 2: volume = 0.5; break;
+            case 3: volume = 0.25; break;
+        }
+        
+        this.channel3.setVolume(volume);
     }
 
     handleChannel3FreqLowWrite(value) {
@@ -327,6 +412,7 @@ export class APU {
         const envelopeVolume = (value & 0xF0) >> 4;
         this.channel4.setEnvelopeVolume(envelopeVolume);
         this.channel4.envelopeStep = (value & 0x07);
+        this.channel4.envelopeCheck = this.channel4.envelopeStep > 0;
     }
 
     handleChannel4PolyCounterWrite(value) {
@@ -410,6 +496,7 @@ class Channel {
         this.apu.setSoundFlag(this.channelNumber, 1);
         this.clockLength = 0;
         this.clockEnvelop = 0;
+        this.envelopeCheck = this.envelopeStep > 0;
     }
     
     stop() {
@@ -419,14 +506,21 @@ class Channel {
     }
     
     update(clockElapsed) {
+        if (!this.playing) return;
+        
         // Handle envelope
         if (this.envelopeCheck && this.clockEnvelop > this.envelopeStepLength && this.envelopeStep > 0) {
             this.clockEnvelop -= this.envelopeStepLength;
             this.envelopeStep--;
+            
+            // Calculate new volume
             let newVolume = this.envelopeVolume + this.envelopeSign;
+            
             // Clamp volume between 0 and 15 (don't wrap)
             newVolume = Math.max(0, Math.min(15, newVolume));
             this.setEnvelopeVolume(newVolume);
+            
+            // If we've reached the volume limit or run out of steps, stop checking
             if (this.envelopeStep <= 0 || newVolume === 0 || newVolume === 15) {
                 this.envelopeCheck = false;
             }
@@ -491,17 +585,21 @@ export class Channel1 extends Channel {
         
         // Default duty cycle is 50%
         this.dutyCycle = 0.5;
+        this.dutyCodes = [0.125, 0.25, 0.5, 0.75]; // GB's 4 duty cycles
     }
 
     play() {
         if (this.playing) return;
         super.play();
         
-        this.gainNode.connect(this.apu.leftMixer);
-        this.gainNode.connect(this.apu.rightMixer);
+        // Make sure the gain node is connected to the outputs
+        this.gainNode.disconnect();
+        this.apu.updateChannelConnection(this, 0, this.apu.nr51);
         
         this.clockSweep = 0;
-        if (this.sweepShifts > 0) this.checkFreqSweep();
+        if (this.sweepShifts > 0 && this.sweepTime > 0) {
+            this.checkFreqSweep();
+        }
     }
 
     stop() {
@@ -522,6 +620,8 @@ export class Channel1 extends Channel {
     update(clockElapsed) {
         super.update(clockElapsed);
         
+        if (!this.playing) return;
+        
         // Handle sweep
         if ((this.sweepCount || this.sweepTime) && this.clockSweep > (this.sweepStepLength * this.sweepTime) && this.sweepTime > 0) {
             this.clockSweep -= (this.sweepStepLength * this.sweepTime);
@@ -540,7 +640,10 @@ export class Channel1 extends Channel {
     setFrequency(value) {
         this.frequency = value;
         // Calculate actual frequency for Web Audio: 131072/(2048-frequency)
-        this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
+        const gbFreq = 131072 / (2048 - (this.frequency & 0x7FF));
+        // Exponential ramp to avoid clicks
+        const currentTime = this.audioContext.currentTime;
+        this.oscillator.frequency.setValueAtTime(gbFreq, currentTime);
     }
 
     getFrequency() {
@@ -548,12 +651,15 @@ export class Channel1 extends Channel {
     }
     
     setDuty(dutyCode) {
-        // GB has 4 duty cycles: 12.5%, 25%, 50%, 75%
-        const dutyCycles = [0.125, 0.25, 0.5, 0.75];
-        this.dutyCycle = dutyCycles[dutyCode];
+        // Set duty cycle (0-3)
+        this.dutyCycle = this.dutyCodes[dutyCode & 0x3];
         
         // Web Audio doesn't support duty cycle setting directly
         // In a full implementation, we would need to use a custom oscillator
+        // or a WaveShaper to modify the square wave
+        
+        // As a simple approach, we still use the standard square oscillator
+        // A more accurate implementation would use a custom periodic wave
     }
 
     disable() {
@@ -581,14 +687,16 @@ export class Channel2 extends Channel {
         
         // Default duty cycle is 50%
         this.dutyCycle = 0.5;
+        this.dutyCodes = [0.125, 0.25, 0.5, 0.75]; // GB's 4 duty cycles
     }
 
     play() {
         if (this.playing) return;
         super.play();
         
-        this.gainNode.connect(this.apu.leftMixer);
-        this.gainNode.connect(this.apu.rightMixer);
+        // Make sure the gain node is connected to the outputs
+        this.gainNode.disconnect();
+        this.apu.updateChannelConnection(this, 1, this.apu.nr51);
     }
 
     stop() {
@@ -599,7 +707,10 @@ export class Channel2 extends Channel {
     setFrequency(value) {
         this.frequency = value;
         // Calculate actual frequency for Web Audio: 131072/(2048-frequency)
-        this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
+        const gbFreq = 131072 / (2048 - (this.frequency & 0x7FF));
+        // Exponential ramp to avoid clicks
+        const currentTime = this.audioContext.currentTime;
+        this.oscillator.frequency.setValueAtTime(gbFreq, currentTime);
     }
 
     getFrequency() {
@@ -607,12 +718,12 @@ export class Channel2 extends Channel {
     }
     
     setDuty(dutyCode) {
-        // GB has 4 duty cycles: 12.5%, 25%, 50%, 75%
-        const dutyCycles = [0.125, 0.25, 0.5, 0.75];
-        this.dutyCycle = dutyCycles[dutyCode];
+        // Set duty cycle (0-3)
+        this.dutyCycle = this.dutyCodes[dutyCode & 0x3];
         
         // Web Audio doesn't support duty cycle setting directly
         // In a full implementation, we would need to use a custom oscillator
+        // or a WaveShaper to modify the square wave
     }
 
     disable() {
@@ -635,42 +746,74 @@ export class Channel3 extends Channel {
         
         // Create buffer for the wave
         this.buffer = new Float32Array(32);
+        for (let i = 0; i < 32; i++) {
+            this.buffer[i] = 0;
+        }
         
         // Create audio nodes for wave playback
         this.baseSpeed = 65536;
         this.waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
-        this.bufferSource = audioContext.createBufferSource();
+        this.waveBuffer.copyToChannel(this.buffer, 0);
+        
+        this.createBufferSource();
+    }
+    
+    createBufferSource() {
+        if (this.bufferSource) {
+            try {
+                this.bufferSource.stop();
+                this.bufferSource.disconnect();
+            } catch (e) {
+                // Ignore errors during cleanup
+            }
+        }
+        
+        this.bufferSource = this.audioContext.createBufferSource();
         this.bufferSource.buffer = this.waveBuffer;
         this.bufferSource.loop = true;
         this.bufferSource.connect(this.gainNode);
-        this.bufferSource.start(0);
     }
 
     play() {
         if (this.playing || !this.dacEnabled) return;
         super.play();
         
-        // Update wave buffer
-        this.waveBuffer.copyToChannel(this.buffer, 0, 0);
+        // Update wave buffer and start playback
+        this.waveBuffer.copyToChannel(this.buffer, 0);
         
-        this.gainNode.connect(this.apu.leftMixer);
-        this.gainNode.connect(this.apu.rightMixer);
+        // Create a new buffer source to restart playback
+        this.createBufferSource();
+        this.bufferSource.start(0);
+        
+        // Connect to mixers
+        this.gainNode.disconnect();
+        this.apu.updateChannelConnection(this, 2, this.apu.nr51);
     }
 
     stop() {
         super.stop();
         this.gainNode.disconnect();
+        
+        try {
+            this.bufferSource.stop();
+        } catch (e) {
+            // Ignore errors during stop
+        }
     }
 
     setFrequency(value) {
         this.frequency = value;
-        value = 65536 / (2048 - value);
-        this.bufferSource.playbackRate.value = value / this.baseSpeed;
+        if (this.bufferSource) {
+            // Calculate actual frequency for GB: 65536 / (2048 - frequency)
+            const gbRate = 65536 / (2048 - (this.frequency & 0x7FF));
+            // Set the playback rate
+            const rate = gbRate / this.baseSpeed;
+            this.bufferSource.playbackRate.setValueAtTime(rate, this.audioContext.currentTime);
+        }
     }
 
     getFrequency() {
-        const freq = 2048 - 65536 / (this.bufferSource.playbackRate.value * this.baseSpeed);
-        return Math.floor(freq);
+        return this.frequency;
     }
 
     setLength(value) {
@@ -678,7 +821,9 @@ export class Channel3 extends Channel {
     }
     
     setVolume(volume) {
-        this.gainNode.gain.value = volume;
+        if (this.gainNode) {
+            this.gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
+        }
     }
 
     setWaveBufferByte(index, value) {
@@ -690,20 +835,28 @@ export class Channel3 extends Channel {
         
         // If the channel is playing, update the wave buffer
         if (this.playing) {
-            this.waveBuffer.copyToChannel(this.buffer, 0, 0);
+            this.waveBuffer.copyToChannel(this.buffer, 0);
         }
     }
 
     disable() {
-        this.bufferSource.disconnect();
+        if (this.bufferSource) {
+            try {
+                this.bufferSource.disconnect();
+            } catch (e) {
+                // Ignore disconnect errors
+            }
+        }
     }
 
     enable() {
-        this.bufferSource.connect(this.gainNode);
+        if (this.bufferSource) {
+            this.bufferSource.connect(this.gainNode);
+        }
     }
 }
 
-// Channel 4 implementation (noise)
+// Channel 4 implementation (noise) with AudioWorklet
 export class Channel4 extends Channel {
     constructor(apu, channelNumber, audioContext) {
         super(apu, channelNumber, audioContext);
@@ -712,28 +865,93 @@ export class Channel4 extends Channel {
         this.shiftFrequency = 0;
         this.counterStep = 15; // 7 or 15 (narrow or wide)
         this.divRatio = 0;
-        
-        // Initialize noise generator
-        this.lfsr = 0x7FFF; // 15-bit Linear Feedback Shift Register
-        this.lastLfsrClock = 0;
         this.noiseFrequency = 1000; // Default frequency
         
-        // Create audio nodes for noise generation
-        this.noiseScriptNode = audioContext.createScriptProcessor(1024, 0, 1);
-        this.noiseScriptNode.onaudioprocess = this.generateNoise.bind(this);
-        this.noiseScriptNode.connect(this.gainNode);
+        // Initialize with a fallback mechanism in case AudioWorklet is not available
+        this.hasWorklet = false;
+        this.workletNode = null;
+        
+        // Create a fallback oscillator with noise approximation
+        this.noiseNode = this.createNoiseNode();
+        this.noiseNode.connect(this.gainNode);
+        
+        // Try to initialize the AudioWorklet
+        this.initNoiseWorklet();
+    }
+    
+    // Create a noise-like sound using existing Web Audio nodes as fallback
+    createNoiseNode() {
+        // Create a buffer with random values
+        const bufferSize = 2 * this.audioContext.sampleRate;
+        const noiseBuffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        
+        for (let i = 0; i < bufferSize; i++) {
+            output[i] = Math.random() * 2 - 1;
+        }
+        
+        // Create noise source
+        const whiteNoise = this.audioContext.createBufferSource();
+        whiteNoise.buffer = noiseBuffer;
+        whiteNoise.loop = true;
+        whiteNoise.start(0);
+        
+        return whiteNoise;
+    }
+    
+    // Initialize the AudioWorklet for noise generation
+    async initNoiseWorklet() {
+        try {
+            // Check if the worklet is available (should be registered by APU)
+            if (this.audioContext.audioWorklet) {
+                // Create the AudioWorkletNode
+                this.workletNode = new AudioWorkletNode(this.audioContext, 'noise-processor');
+                
+                // Connect it properly
+                this.workletNode.connect(this.gainNode);
+                
+                // Disconnect the fallback noise
+                this.noiseNode.disconnect();
+                
+                // Set flag indicating we're using the worklet
+                this.hasWorklet = true;
+                
+                console.log("Channel 4 using AudioWorklet");
+                
+                // Update parameters
+                this.updateWorkletParameters();
+            }
+        } catch (err) {
+            console.error("Error initializing noise worklet:", err);
+            // Keep using the fallback mechanism
+        }
+    }
+    
+    // Update the worklet parameters
+    updateWorkletParameters() {
+        if (this.hasWorklet && this.workletNode) {
+            this.workletNode.port.postMessage({
+                type: 'updateParams',
+                divRatio: this.divRatio === 0 ? 0.5 : this.divRatio,
+                shiftFreq: this.shiftFrequency,
+                counterStep: this.counterStep,
+                frequency: this.noiseFrequency
+            });
+        }
     }
     
     play() {
         if (this.playing) return;
         super.play();
         
-        // Reset LFSR
-        this.lfsr = 0x7FFF;
+        // Reset the noise generator
+        if (this.hasWorklet && this.workletNode) {
+            this.workletNode.port.postMessage({ type: 'reset' });
+        }
         
-        // Connect to output
-        this.gainNode.connect(this.apu.leftMixer);
-        this.gainNode.connect(this.apu.rightMixer);
+        // Connect to mixers
+        this.gainNode.disconnect();
+        this.apu.updateChannelConnection(this, 3, this.apu.nr51);
     }
     
     stop() {
@@ -751,46 +969,28 @@ export class Channel4 extends Channel {
         // where r is the dividing ratio (divisor)
         const r = divRatio === 0 ? 0.5 : divRatio;
         this.noiseFrequency = 524288 / r / Math.pow(2, shiftFreq);
+        
+        // Update worklet parameters
+        this.updateWorkletParameters();
     }
     
     setEnvelopeVolume(volume) {
         super.setEnvelopeVolume(volume);
     }
     
-    // Generate actual noise samples
-    generateNoise(e) {
-        const outputBuffer = e.outputBuffer.getChannelData(0);
-        const currentTime = this.audioContext.currentTime;
-        
-        // Calculate samples per shift based on frequency
-        const samplesPerShift = this.audioContext.sampleRate / this.noiseFrequency;
-        
-        for (let i = 0; i < outputBuffer.length; i++) {
-            // Determine if it's time for a new bit of the LFSR
-            const sampleTime = currentTime + i / this.audioContext.sampleRate;
-            if (sampleTime >= this.lastLfsrClock + 1/this.noiseFrequency) {
-                // Update LFSR state
-                const xorResult = ((this.lfsr & 1) ^ ((this.lfsr >> 1) & 1)) & 1;
-                this.lfsr = (this.lfsr >> 1) | (xorResult << 14);
-                
-                // If using 7-bit mode, also apply XOR to bit 6
-                if (this.counterStep === 7) {
-                    this.lfsr = (this.lfsr & ~0x40) | (xorResult << 6);
-                }
-                
-                this.lastLfsrClock = sampleTime;
-            }
-            
-            // Output the current LFSR state - inverting bit 0 gives us a 50% duty cycle noise
-            outputBuffer[i] = (this.lfsr & 1) ? -1 : 1;
+    disable() {
+        if (this.hasWorklet && this.workletNode) {
+            this.workletNode.disconnect();
+        } else if (this.noiseNode) {
+            this.noiseNode.disconnect();
         }
     }
     
-    disable() {
-        this.noiseScriptNode.disconnect();
-    }
-    
     enable() {
-        this.noiseScriptNode.connect(this.gainNode);
+        if (this.hasWorklet && this.workletNode) {
+            this.workletNode.connect(this.gainNode);
+        } else if (this.noiseNode) {
+            this.noiseNode.connect(this.gainNode);
+        }
     }
 }
