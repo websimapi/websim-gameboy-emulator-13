@@ -87,6 +87,24 @@
             border-radius: 4px;
         }
     </style>
+    <!-- Import map to specify module locations -->
+    <script type="importmap">
+    {
+      "imports": {
+        "gameboy": "./index.js",
+        "./core.js": "./core.js",
+        "./memory.js": "./memory.js",
+        "./gpu.js": "./gpu.js",
+        "./screen.js": "./screen.js",
+        "./input.js": "./input.js",
+        "./audio.js": "./audio.js",
+        "./timer.js": "./timer.js",
+        "./rom.js": "./rom.js",
+        "./utils.js": "./utils.js",
+        "./constants.js": "./constants.js"
+      }
+    }
+    </script>
 </head>
 <body>
 
@@ -160,9 +178,11 @@
 
 </div>
 
-<script src="./gameboy.js"></script>
+<!-- Use type="module" for ES modules -->
+<script type="module">
+// Import the GameboyJS namespace
+import GameboyJS from 'gameboy';
 
-<script>
 // Audio context initialization
 let audioContext = null;
 var g; // Make g variable global

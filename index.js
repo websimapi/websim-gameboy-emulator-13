@@ -1,34 +1,76 @@
-// GameboyJS - Modular Gameboy Emulator
-// Main entry point that exposes the public API
+// index.js - Main entry point for the GameboyJS emulator
+// This file imports all modules and exports the public API
 
-// For now, we're importing from the monolithic gameboy.js
-// As we create individual module files, we'll update these imports
-import './gameboy.js';
+// Import all modules (these will be created in subsequent steps)
+import { Gameboy } from './core.js';
+import { Memory, MBC } from './memory.js';
+import { GPU } from './gpu.js';
+import { Screen } from './screen.js';
+import { Input, Keyboard, Gamepad } from './input.js';
+import { APU, Channel1, Channel3, Channel4 } from './audio.js';
+import { Timer } from './timer.js';
+import { Rom, RomFileReader, RomDropFileReader, RomAjaxReader } from './rom.js';
+import { Util, Debug, UnimplementedException, ConsoleSerial, DummySerial } from './utils.js';
+import { opcodeMap, opcodeCbmap } from './constants.js';
 
-// Create our namespace and expose the public API
-const GameboyJS = window.GameboyJS || {};
+// Create the main GameboyJS namespace to maintain compatibility with existing code
+const GameboyJS = {
+  // Core components
+  Gameboy,
+  CPU: Gameboy.CPU, // We'll define CPU as part of the Gameboy module
+  
+  // Memory
+  Memory,
+  MBC,
+  
+  // GPU and display
+  GPU,
+  Screen,
+  
+  // Input
+  Input,
+  Keyboard,
+  Gamepad,
+  
+  // Audio
+  APU,
+  Channel1,
+  Channel3,
+  Channel4,
+  
+  // Timer
+  Timer,
+  
+  // ROM handling
+  Rom,
+  RomFileReader,
+  RomDropFileReader,
+  RomAjaxReader,
+  
+  // Utilities
+  Util,
+  Debug,
+  UnimplementedException,
+  ConsoleSerial,
+  DummySerial,
+  
+  // OpCode maps
+  opcodeMap,
+  opcodeCbmap
+};
 
-// Export the main classes
-export const Gameboy = GameboyJS.Gameboy;
-export const CPU = GameboyJS.CPU;
-export const GPU = GameboyJS.GPU;
-export const Screen = GameboyJS.Screen;
-export const Memory = GameboyJS.Memory;
-export const Input = GameboyJS.Input;
-export const Keyboard = GameboyJS.Keyboard;
-export const Gamepad = GameboyJS.Gamepad;
-export const APU = GameboyJS.APU;
-export const Timer = GameboyJS.Timer;
-
-// Export ROM-related classes
-export const Rom = GameboyJS.Rom;
-export const RomFileReader = GameboyJS.RomFileReader;
-export const RomDropFileReader = GameboyJS.RomDropFileReader;
-export const RomAjaxReader = GameboyJS.RomAjaxReader;
-
-// Export utility classes and functions
-export const Util = GameboyJS.Util;
-export const Debug = GameboyJS.Debug;
-
-// Export the default object for convenience
+// Export the namespace as default
 export default GameboyJS;
+
+// Also export individual components for those who prefer named imports
+export {
+  Gameboy,
+  Memory, MBC,
+  GPU, Screen,
+  Input, Keyboard, Gamepad,
+  APU, Channel1, Channel3, Channel4,
+  Timer,
+  Rom, RomFileReader, RomDropFileReader, RomAjaxReader,
+  Util, Debug, UnimplementedException, ConsoleSerial, DummySerial,
+  opcodeMap, opcodeCbmap
+};
