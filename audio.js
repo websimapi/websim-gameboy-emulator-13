@@ -18,10 +18,10 @@ export class APU {
         this.gainNode = null;
         
         // Create channels with empty objects that will forward to worker
-        this.channel1 = new WorkerChannel(1, this);
-        this.channel2 = new WorkerChannel(2, this);
-        this.channel3 = new WorkerChannel(3, this);
-        this.channel4 = new WorkerChannel(4, this);
+        this.channel1 = new Channel1(1, this);
+        this.channel2 = new Channel2(2, this);
+        this.channel3 = new Channel3(3, this);
+        this.channel4 = new Channel4(4, this);
         
         this.initAudioSystem();
     }
@@ -316,8 +316,8 @@ export class APU {
     }
 }
 
-// Worker Channel - proxies to the Web Worker
-export class WorkerChannel {
+// Base class for all worker-based channels to provide a consistent interface
+class WorkerChannelBase {
     constructor(channelNumber, apu) {
         this.apu = apu;
         this.channelNumber = channelNumber;
@@ -325,22 +325,6 @@ export class WorkerChannel {
         this.playing = false;
         this.lengthCheck = false;
         this.soundLength = 64;
-        
-        // Create initial parameters
-        const initialParams = {
-            frequency: 0,
-            envelopeVolume: 0,
-            playing: false,
-            lengthCheck: false,
-            soundLength: 64
-        };
-        
-        // Initialize channel in worker
-        this.apu.worker?.postMessage({
-            type: 'createChannel',
-            channel: channelNumber,
-            params: initialParams
-        });
     }
 
     play() {
@@ -389,6 +373,29 @@ export class WorkerChannel {
             params: { lengthCheck: value }
         });
     }
+}
+
+// Channel1 - Square wave with frequency sweep
+export class Channel1 extends WorkerChannelBase {
+    constructor(channelNumber, apu) {
+        super(channelNumber, apu);
+        
+        // Initialize channel in worker with default parameters
+        this.apu.worker?.postMessage({
+            type: 'createChannel',
+            channel: channelNumber,
+            params: {
+                frequency: 0,
+                envelopeVolume: 0,
+                playing: false,
+                lengthCheck: false,
+                soundLength: 64,
+                sweepTime: 0,
+                sweepSign: 1,
+                sweepShifts: 0
+            }
+        });
+    }
 
     updateSweep(params) {
         this.apu.worker?.postMessage({
@@ -405,24 +412,74 @@ export class WorkerChannel {
             params: params
         });
     }
+}
+
+// Channel2 - Square wave
+export class Channel2 extends Channel1 {
+    constructor(channelNumber, apu) {
+        super(channelNumber, apu);
+    }
+}
+
+// Channel3 - Wave output
+export class Channel3 extends WorkerChannelBase {
+    constructor(channelNumber, apu) {
+        super(channelNumber, apu);
+        
+        // Initialize channel in worker
+        this.apu.worker?.postMessage({
+            type: 'createChannel',
+            channel: channelNumber,
+            params: {
+                frequency: 0,
+                playing: false,
+                lengthCheck: false,
+                soundLength: 256
+            }
+        });
+    }
 
     setWaveBufferByte(index, value) {
-        // For Channel 3, we need to update the wave buffer
-        if (this.channelNumber === 3) {
-            // Convert byte to two float samples
-            const sample1 = (value >> 4) / 8 - 1;
-            const sample2 = (value & 0x0F) / 8 - 1;
-            
-            this.apu.worker?.postMessage({
-                type: 'updateChannel',
-                channel: 3,
-                params: {
-                    waveBufferUpdate: {
-                        index: index * 2,
-                        samples: [sample1, sample2]
-                    }
+        // Convert byte to two float samples
+        const sample1 = (value >> 4) / 8 - 1;
+        const sample2 = (value & 0x0F) / 8 - 1;
+        
+        this.apu.worker?.postMessage({
+            type: 'updateChannel',
+            channel: this.channelNumber,
+            params: {
+                waveBufferUpdate: {
+                    index: index * 2,
+                    samples: [sample1, sample2]
                 }
-            });
-        }
+            }
+        });
+    }
+}
+
+// Channel4 - Noise
+export class Channel4 extends WorkerChannelBase {
+    constructor(channelNumber, apu) {
+        super(channelNumber, apu);
+        
+        // Initialize channel in worker
+        this.apu.worker?.postMessage({
+            type: 'createChannel',
+            channel: channelNumber,
+            params: {
+                playing: false,
+                lengthCheck: false,
+                soundLength: 64,
+                clockRate: 1
+            }
+        });
+    }
+
+    updateNoise(params) {
+        this.apu.worker?.postMessage({
+            type: 'updateChannel',
+            channel: this.channelNumber,
+            params: params
+        });
     }
 }
