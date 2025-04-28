@@ -179,9 +179,12 @@ function updatePerformanceDisplay() {
         if (display) {
             // Display FPS and also show info from CPU if available
             let info = `FPS: ${fps.toFixed(1)}`;
-            if (typeof window.g !== 'undefined' && window.g && window.g.cpu) {
-                info += ` | Instructions: ${window.g.cpu.totalInstructions}`;
-                if (window.g.cpu.currentFps) {
+            // Only try to access g if it's defined
+            if (typeof window.g !== 'undefined' && window.g) {
+                if (window.g.cpu && window.g.cpu.totalInstructions) {
+                    info += ` | Instructions: ${window.g.cpu.totalInstructions}`;
+                }
+                if (window.g.cpu && window.g.cpu.currentFps) {
                     info += ` | CPU: ${window.g.cpu.currentFps.toFixed(1)}fps`;
                 }
             }
@@ -284,6 +287,8 @@ if (useOriginal) {
             
             // Set up speed control
             document.getElementById('emulation-speed').addEventListener('input', updateEmulationSpeed);
+            
+            console.log("Gameboy instance created successfully", window.g);
         }
 
         // When document is loaded, initialize the Audio

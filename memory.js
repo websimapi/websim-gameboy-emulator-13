@@ -382,9 +382,40 @@ export class MBC3 {
         }
     }
 
+    updateRTC() {
+        // Only update if RTC registers are being used and not latched
+        if (!this.rtcLatched && this.rtcRegisterSelected) {
+            const now = new Date();
+            // Store seconds (0-59)
+            this.rtcRegisters[0] = now.getSeconds();
+            // Store minutes (0-59)
+            this.rtcRegisters[1] = now.getMinutes();
+            // Store hours (0-23)
+            this.rtcRegisters[2] = now.getHours();
+            
+            // Handle day counter (0-511)
+            const daysSinceEpoch = Math.floor(now / 8.64e7); // days since epoch
+            if (!this.rtcEpochDay) {
+                // If first time, store current day as epoch
+                this.rtcEpochDay = daysSinceEpoch;
+            }
+            
+            const days = (daysSinceEpoch - this.rtcEpochDay) % 512;
+            
+            // Store day counter lower 8 bits
+            this.rtcRegisters[3] = days & 0xFF;
+            
+            // Store day counter high bit and flags
+            // Bit 0: Day counter bit 8
+            // Bit 6: Halt flag (0=active, 1=halted)
+            // Bit 7: Day counter carry bit
+            this.rtcRegisters[4] = (this.rtcRegisters[4] & 0xC0) | ((days >> 8) & 0x01);
+        }
+    }
+
     manageWrite(addr, value) {
         switch (addr & 0xF000) {
-            case 0x0000: case 0x1000: // enable RAM
+            case 0x0000: case 0x1000: // enable RAM/RTC
                 this.ramEnabled = (value & 0x0A) ? true : false;
                 if (this.ramEnabled) {
                     this.extRam.saveRamData();
@@ -410,21 +441,26 @@ export class MBC3 {
                     // RTC register
                     this.rtcRegisterSelected = true;
                     this.rtcRegisterIndex = value - 0x08;
+                    // Update RTC immediately when selected
+                    this.updateRTC();
                 }
                 break;
             case 0x6000: case 0x7000: // Latch clock data
-                // Instead of throwing an exception, implement a basic latch mechanism
+                // Handle the clock latch correctly
                 if (this.rtcLatchValue == 0 && value == 1) {
                     this.rtcLatched = !this.rtcLatched;
-                    this.updateRTC(); // Update RTC values when latching
+                    // Only update when latching, not when unlatching
+                    if (this.rtcLatched) {
+                        this.updateRTC();
+                    }
                 }
                 this.rtcLatchValue = value;
                 break;
             case 0xA000: case 0xB000:
-                if (this.rtcRegisterSelected && this.rtcRegisterIndex >= 0 && this.rtcRegisterIndex < 5) {
+                if (this.rtcRegisterSelected && this.ramEnabled && this.rtcRegisterIndex >= 0 && this.rtcRegisterIndex < 5) {
                     // Write to RTC register
                     this.rtcRegisters[this.rtcRegisterIndex] = value;
-                } else {
+                } else if (this.ramEnabled) {
                     // Write to RAM
                     this.extRam.manageWrite(addr - 0xA000, value);
                 }
@@ -439,25 +475,6 @@ export class MBC3 {
         }
         // Read from RAM
         return this.extRam.manageRead(addr - 0xA000);
-    }
-
-    // Basic RTC implementation
-    updateRTC() {
-        // Simple implementation - just increment seconds counter
-        // In a full implementation, we would track real time
-        if (!this.rtcLatched) {
-            const now = new Date();
-            // Store seconds (0-59)
-            this.rtcRegisters[0] = now.getSeconds();
-            // Store minutes (0-59)
-            this.rtcRegisters[1] = now.getMinutes();
-            // Store hours (0-23)
-            this.rtcRegisters[2] = now.getHours();
-            // Store day counter lower 8 bits
-            this.rtcRegisters[3] = (now.getDate() & 0xFF);
-            // Store day counter high bit and flags
-            this.rtcRegisters[4] = 0; // Day counter bit 8, Halt flag, Day counter carry bit
-        }
     }
 }
 

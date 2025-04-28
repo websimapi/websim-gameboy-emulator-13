@@ -1,4 +1,4 @@
-// cpu-operations.js - CPU Operations implementation
+// cpu-operations.js - Update the missing JPnn function and fix operation issues
 
 import { Util } from './utils.js';
 import { opcodeCbmap } from './constants.js';
@@ -122,12 +122,45 @@ export const cpuOps = {
     SWAPrra:function(p, r1, r2){var addr = (p.r[r1] << 8)+ p.r[r2]; p.memory.wb(addr, cpuOps._SWAPn(p, p.memory.rb(addr))); p.clock.c+=12;},
     _SWAPn: function(p, n){p.r.F = n==0?0x80:0;return ((n&0xF0) >> 4) | ((n&0x0F) << 4);},
     
-    // Jump operations - the JPnn function was missing
-    JPnn:   function(p) {p.wr('pc', (p.memory.rb(p.r.pc+1) << 8) + p.memory.rb(p.r.pc));p.clock.c += 16;},
-    JRccn:  function(p, cc) {if (Util.testFlag(p, cc)){var v=p.memory.rb(p.r.pc++);v=Util.getSignedValue(v);p.r.pc += v;p.clock.c+=4;}else{p.r.pc++;}p.clock.c += 8;},
-    JPccnn: function(p, cc) {if (Util.testFlag(p, cc)){p.wr('pc', (p.memory.rb(p.r.pc+1) << 8) + p.memory.rb(p.r.pc));p.clock.c+=4;}else{p.r.pc+=2;}p.clock.c += 12;},
-    JPrr:   function(p, r1, r2) {p.r.pc = (p.r[r1] << 8) + p.r[r2];p.clock.c += 4;},
-    JRn:    function(p) {var v=p.memory.rb(p.r.pc++);v=Util.getSignedValue(v);p.r.pc += v;p.clock.c += 12;},
+    // Jump operations
+    JPnn:   function(p) {
+        const lowByte = p.memory.rb(p.r.pc);
+        const highByte = p.memory.rb(p.r.pc+1);
+        p.wr('pc', (highByte << 8) + lowByte);
+        p.clock.c += 16;
+    },
+    JRccn:  function(p, cc) {
+        if (Util.testFlag(p, cc)){
+            var v=p.memory.rb(p.r.pc++);
+            v=Util.getSignedValue(v);
+            p.r.pc += v;
+            p.clock.c+=4;
+        } else {
+            p.r.pc++;
+        }
+        p.clock.c += 8;
+    },
+    JPccnn: function(p, cc) {
+        if (Util.testFlag(p, cc)){
+            const lowByte = p.memory.rb(p.r.pc);
+            const highByte = p.memory.rb(p.r.pc+1);
+            p.wr('pc', (highByte << 8) + lowByte);
+            p.clock.c+=4;
+        } else {
+            p.r.pc+=2;
+        }
+        p.clock.c += 12;
+    },
+    JPrr:   function(p, r1, r2) {
+        p.r.pc = (p.r[r1] << 8) + p.r[r2];
+        p.clock.c += 4;
+    },
+    JRn:    function(p) {
+        var v=p.memory.rb(p.r.pc++);
+        v=Util.getSignedValue(v);
+        p.r.pc += v;
+        p.clock.c += 12;
+    },
     
     PUSHrr: function(p, r1, r2) {p.wr('sp', p.r.sp-1);p.memory.wb(p.r.sp, p.r[r1]);p.wr('sp', p.r.sp-1);p.memory.wb(p.r.sp, p.r[r2]);p.clock.c+=16;},
     POPrr:  function(p, r1, r2) {p.wr(r2, p.memory.rb(p.r.sp));p.wr('sp', p.r.sp+1);p.wr(r1, p.memory.rb(p.r.sp));p.wr('sp', p.r.sp+1);p.clock.c+=12;},
@@ -170,7 +203,13 @@ export const cpuOps = {
     DI:     function(p) {p.disableInterrupts();p.clock.c += 4;},
     EI:     function(p) {p.enableInterrupts();p.clock.c += 4;},
     RETI:   function(p) {p.enableInterrupts();cpuOps.RET(p);},
-    CB:     function(p) {var opcode = p.memory.rb(p.r.pc++);
+    CB:     function(p) {
+        var opcode = p.memory.rb(p.r.pc++);
+        if (!opcodeCbmap[opcode]) {
+            console.error(`Unknown CB opcode ${opcode.toString(16)} at address ${(p.r.pc-1).toString(16)}`);
+            return;
+        }
         opcodeCbmap[opcode](p);
-        p.clock.c+=4;}
+        p.clock.c+=4;
+    }
 };
