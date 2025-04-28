@@ -23,25 +23,31 @@ export class APU {
         this.masterGain = this.audioContext.createGain();
         this.masterGain.gain.value = 0.25; // Default master volume
 
+        // Initial panning setup - center all channels
+        this.nr50 = 0x77; // Default volume (both VIN and normal sound)
+        this.nr51 = 0xFF; // Default connections (all channels to both outputs)
+        
+        // Register audio worklet for noise generator before initializing channels
+        this.workletReady = false;
+        this.workletPromise = this.setupAudioWorklets();
+        
         // Initialize channels
         this.channel1 = new Channel1(this, 1, this.audioContext);
         this.channel2 = new Channel2(this, 2, this.audioContext);
         this.channel3 = new Channel3(this, 3, this.audioContext);
         this.channel4 = new Channel4(this, 4, this.audioContext);
-
-        // Initial panning setup - center all channels
-        this.nr50 = 0x77; // Default volume (both VIN and normal sound)
-        this.nr51 = 0xFF; // Default connections (all channels to both outputs)
         
         // Connect channels to mixers based on initial state
         this.updateChannelConnections();
-        
-        // Register audio worklet for noise generator
-        this.setupAudioWorklets();
     }
     
     async setupAudioWorklets() {
         try {
+            if (!this.audioContext.audioWorklet) {
+                console.warn("AudioWorklet not supported in this browser");
+                return false;
+            }
+            
             // Register the noise processor worklet
             await this.audioContext.audioWorklet.addModule('data:text/javascript;base64,' + btoa(`
                 class NoiseProcessor extends AudioWorkletProcessor {
@@ -100,14 +106,20 @@ export class APU {
                 
                 registerProcessor('noise-processor', NoiseProcessor);
             `));
-            console.log("Noise worklet registered successfully");
             
-            // If Channel4 is already initialized, update it to use the worklet
+            console.log("Noise worklet registered successfully");
+            this.workletReady = true;
+            
+            // Notify Channel4 that the worklet is ready
             if (this.channel4) {
                 this.channel4.initNoiseWorklet();
             }
+            
+            return true;
         } catch (err) {
-            console.error("Failed to register audio worklet:", err);
+            console.error("Error initializing noise worklet:", err);
+            this.workletReady = false;
+            return false;
         }
     }
 
@@ -170,6 +182,8 @@ export class APU {
     
     // Helper to connect a single channel to left/right mixers as needed
     updateChannelConnection(channel, channelBitIndex, nr51) {
+        if (!channel || !channel.gainNode) return;
+        
         const toRight = (nr51 & (1 << channelBitIndex)) !== 0;
         const toLeft = (nr51 & (1 << (channelBitIndex + 4))) !== 0;
         
@@ -874,9 +888,6 @@ export class Channel4 extends Channel {
         // Create a fallback oscillator with noise approximation
         this.noiseNode = this.createNoiseNode();
         this.noiseNode.connect(this.gainNode);
-        
-        // Try to initialize the AudioWorklet
-        this.initNoiseWorklet();
     }
     
     // Create a noise-like sound using existing Web Audio nodes as fallback
@@ -900,10 +911,10 @@ export class Channel4 extends Channel {
     }
     
     // Initialize the AudioWorklet for noise generation
-    async initNoiseWorklet() {
+    initNoiseWorklet() {
         try {
             // Check if the worklet is available (should be registered by APU)
-            if (this.audioContext.audioWorklet) {
+            if (this.apu.workletReady && this.audioContext.audioWorklet) {
                 // Create the AudioWorkletNode
                 this.workletNode = new AudioWorkletNode(this.audioContext, 'noise-processor');
                 
@@ -920,11 +931,13 @@ export class Channel4 extends Channel {
                 
                 // Update parameters
                 this.updateWorkletParameters();
+                return true;
             }
         } catch (err) {
             console.error("Error initializing noise worklet:", err);
             // Keep using the fallback mechanism
         }
+        return false;
     }
     
     // Update the worklet parameters
@@ -943,6 +956,11 @@ export class Channel4 extends Channel {
     play() {
         if (this.playing) return;
         super.play();
+        
+        // Try to initialize the worklet if it's not already done
+        if (!this.hasWorklet) {
+            this.initNoiseWorklet();
+        }
         
         // Reset the noise generator
         if (this.hasWorklet && this.workletNode) {
