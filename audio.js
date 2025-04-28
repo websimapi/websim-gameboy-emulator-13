@@ -11,6 +11,7 @@ export class APU {
         this.memory = memory;
         this.enabled = false;
         this.needsUserInteraction = true;
+        this.audioAvailable = true;
         
         // Create audio context with error handling
         try {
@@ -27,8 +28,18 @@ export class APU {
             this.rightGain = this.audioContext.createGain();
             this.leftGain.connect(this.masterGain);
             this.rightGain.connect(this.masterGain);
-            
-            // Create audio channels
+        } catch (e) {
+            console.warn("Audio initialization failed:", e);
+            this.audioAvailable = false;
+            this.audioContext = null;
+            this.masterGain = null;
+            this.leftGain = null;
+            this.rightGain = null;
+        }
+        
+        // Create audio channels - make sure to pass appropriate values based on audio availability
+        if (this.audioAvailable) {
+            // Create channels with the audio context
             this.channel1 = new Channel1(this, 1, this.audioContext);
             this.channel2 = new Channel1(this, 2, this.audioContext); // Channel2 uses Channel1 implementation
             this.channel3 = new Channel3(this, 3, this.audioContext);
@@ -36,16 +47,8 @@ export class APU {
             
             // Connect to stereo channels based on initial panning (all channels to both outputs)
             this.updatePanning(0xFF);
-        } catch (e) {
-            console.warn("Audio initialization failed:", e);
-            // Create dummy audio objects for graceful degradation
-            this.audioAvailable = false;
-            this.audioContext = null;
-            this.masterGain = null;
-            this.leftGain = null;
-            this.rightGain = null;
-            
-            // Create dummy channel objects
+        } else {
+            // Create dummy channel objects when audio isn't available
             this.channel1 = new DummyChannel(this, 1);
             this.channel2 = new DummyChannel(this, 2);
             this.channel3 = new DummyChannel(this, 3);
@@ -156,23 +159,21 @@ export class APU {
     
     // Connect/disconnect a channel to left/right outputs based on panning
     updateChannelPanning(channel, panning) {
-        if (!this.audioContext) return;
+        if (!this.audioContext || !channel.gainNode) return;
         
-        if (channel.gainNode) {
-            try {
-                // First disconnect from both
-                channel.gainNode.disconnect();
-                
-                // Then connect to the appropriate outputs
-                if (panning.left) {
-                    channel.gainNode.connect(this.leftGain);
-                }
-                if (panning.right) {
-                    channel.gainNode.connect(this.rightGain);
-                }
-            } catch (e) {
-                console.warn("Error updating channel panning:", e);
+        try {
+            // First disconnect from both
+            channel.gainNode.disconnect();
+            
+            // Then connect to the appropriate outputs
+            if (panning.left) {
+                channel.gainNode.connect(this.leftGain);
             }
+            if (panning.right) {
+                channel.gainNode.connect(this.rightGain);
+            }
+        } catch (e) {
+            console.warn("Error updating channel panning:", e);
         }
     }
 
@@ -382,6 +383,9 @@ export class Channel1 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
+        this.audioContext = null;
+        this.gainNode = null;
+        this.oscillator = null;
 
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
         this.soundLength = 64; // defaults to 64 periods
@@ -407,15 +411,12 @@ export class Channel1 {
         this.clockSweep = 0;
 
         if (!audioContext) {
-            // Create dummy properties if audio context is not available
-            this.gainNode = null;
-            this.oscillator = null;
-            this.audioContext = null;
-            return;
+            return; // Already set null values above
         }
 
         // Create audio nodes
         try {
+            this.audioContext = audioContext;
             this.gainNode = audioContext.createGain();
             this.gainNode.gain.value = 0;
             
@@ -424,8 +425,6 @@ export class Channel1 {
             this.oscillator.frequency.value = 440; // Default frequency
             this.oscillator.connect(this.gainNode);
             this.oscillator.start(0);
-
-            this.audioContext = audioContext;
             
             // Set initial duty cycle
             this.setDuty(this.duty);
@@ -630,6 +629,11 @@ export class Channel3 {
         this.channelNumber = channelNumber;
         this.playing = false;
         this.dacPower = false;
+        this.audioContext = null;
+        this.gainNode = null;
+        this.waveBuffer = null;
+        this.bufferSource = null;
+        this.baseSpeed = 65536;
 
         this.soundLength = 256; // defaults to 256 periods
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
@@ -646,31 +650,23 @@ export class Channel3 {
         }
 
         if (!audioContext) {
-            // Create dummy properties if audio context is not available
-            this.gainNode = null;
-            this.waveBuffer = null;
-            this.bufferSource = null;
-            this.audioContext = null;
-            this.baseSpeed = 65536;
-            return;
+            return; // Already set null values above
         }
 
         // Create audio nodes
         try {
+            this.audioContext = audioContext;
             this.gainNode = audioContext.createGain();
             this.gainNode.gain.value = 0;
             
             // Create wave using AudioBuffer
-            this.baseSpeed = 65536; // Base sample rate for wave playback
             this.waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
             
             // Initialize buffer (no sound yet)
             this.updateWaveBuffer();
             
-            // Create buffer source
+            // Create buffer source AFTER all properties are set
             this.createBufferSource();
-
-            this.audioContext = audioContext;
         } catch (e) {
             console.warn("Failed to initialize wave channel:", e);
             this.gainNode = null;
@@ -704,7 +700,7 @@ export class Channel3 {
     }
 
     play() {
-        if (this.playing || !this.dacPower || !this.bufferSource) return;
+        if (this.playing || !this.dacPower || !this.gainNode) return;
         
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
@@ -767,11 +763,10 @@ export class Channel3 {
     }
 
     setFrequency(value) {
-        const frequency = value & 0x7FF;
-        
         if (!this.bufferSource) return;
         
         try {
+            const frequency = value & 0x7FF;
             // Convert GB frequency to playback rate
             // Formula: 65536 / (2048 - frequency) Hz
             const rate = 65536 / (2048 - frequency);
@@ -864,6 +859,11 @@ export class Channel4 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
+        this.audioContext = null;
+        this.gainNode = null;
+        this.noiseBuffer = null;
+        this.bufferSource = null;
+        this.filter = null;
 
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
         this.soundLength = 64; // defaults to 64 periods
@@ -884,17 +884,12 @@ export class Channel4 {
         this.dividerRatio = 0;
 
         if (!audioContext) {
-            // Create dummy properties if audio context is not available
-            this.gainNode = null;
-            this.noiseBuffer = null;
-            this.bufferSource = null;
-            this.filter = null;
-            this.audioContext = null;
-            return;
+            return; // Already set null values above
         }
         
         // Create audio nodes
         try {
+            this.audioContext = audioContext;
             this.gainNode = audioContext.createGain();
             this.gainNode.gain.value = 0;
             
@@ -904,8 +899,6 @@ export class Channel4 {
             this.filter.frequency.value = 1000;
             this.filter.Q.value = 1;
             this.filter.connect(this.gainNode);
-            
-            this.audioContext = audioContext;
             
             // Generate initial noise buffer
             this.generateNoiseBuffer();
@@ -934,7 +927,6 @@ export class Channel4 {
             // This is a simplification, but approximates the Game Boy noise
             const lfsr = (1 << 14) - 1; // Start with 15 bits set (except MSB)
             const mask = this.counterStep ? 0x7F : 0x7FFF;
-            const xorBits = this.counterStep ? (1 << 6) : (1 << 14);
             
             let lfsr_state = lfsr;
             for (let i = 0; i < bufferSize; i++) {
@@ -977,7 +969,7 @@ export class Channel4 {
     }
 
     play() {
-        if (this.playing || !this.bufferSource) return;
+        if (this.playing || !this.gainNode) return;
         
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
