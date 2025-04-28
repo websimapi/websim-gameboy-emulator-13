@@ -1,4 +1,4 @@
-// cpu.js - Updates to make the CPU work with the debugger
+// cpu.js - Updates for better debugger performance
 
 import { opcodeMap, opcodeCbmap, CPUInterrupts } from './constants.js';
 import { Memory } from './memory.js';
@@ -20,6 +20,13 @@ export class CPU {
         this.isPaused = false;
         this.usingBootRom = false;
         this.debugMode = false;
+        
+        // Performance tracking
+        this.lastFrameTime = performance.now();
+        this.frameCount = 0;
+        this.fpsUpdateInterval = 1000; // Update FPS once per second
+        this.lastFpsUpdate = 0;
+        this.currentFps = 0;
 
         this.createDevices();
     }
@@ -116,14 +123,27 @@ export class CPU {
         }
     }
 
-    // Fetch-and-execute loop
-    // Will execute instructions for the duration of a frame
+    // Modified frame method with FPS tracking and debugger optimizations
     frame() {
         if (!this.isPaused) {
             this.nextFrameTimer = setTimeout(this.frame.bind(this), 1000 / 60); 
         }
 
         try {
+            // Track frame performance
+            const now = performance.now();
+            const frameDelta = now - this.lastFrameTime;
+            this.lastFrameTime = now;
+            this.frameCount++;
+            
+            // Update FPS counter every second
+            if (now - this.lastFpsUpdate > this.fpsUpdateInterval) {
+                this.currentFps = this.frameCount / ((now - this.lastFpsUpdate) / 1000);
+                this.frameCount = 0;
+                this.lastFpsUpdate = now;
+            }
+
+            // Main execution loop
             var vblank = false;
             while (!vblank) {
                 var oldInstrCount = this.clock.c;
@@ -150,8 +170,8 @@ export class CPU {
             }
             this.clock.c = 0;
             
-            // Update debug performance metrics
-            if (this.gameboy.debugger) {
+            // Update debug performance metrics, but only if debugger is enabled
+            if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
                 this.gameboy.debugger.updatePerformanceMetrics();
                 this.gameboy.debugger.updateUI();
             }
@@ -161,6 +181,25 @@ export class CPU {
             } else {
                 this.gameboy.handleException(e);
             }
+        }
+    }
+
+    // Modified executeInstruction for better debugger integration
+    executeInstruction() {
+        var opcode = this.fetchOpcode();
+        if (opcode !== null) {
+            // Only record the opcode if debugger is enabled and active
+            if (this.gameboy.debugger && this.gameboy.debugger.enabled) {
+                this.gameboy.debugger.recordOpcode(this.r.pc - 1, opcode);
+                
+                // Check for breakpoints
+                if (this.gameboy.debugger.checkBreakpoint(this.r.pc - 1)) {
+                    return;
+                }
+            }
+            
+            opcodeMap[opcode](this);
+            this.r.F &= 0xF0; // tmp fix
         }
     }
 
@@ -179,24 +218,6 @@ export class CPU {
         
         if (this.gameboy.debugger) {
             this.gameboy.debugger.updateUI();
-        }
-    }
-
-    executeInstruction() {
-        var opcode = this.fetchOpcode();
-        if (opcode !== null) {
-            // Record the opcode for debugging
-            if (this.gameboy.debugger) {
-                this.gameboy.debugger.recordOpcode(this.r.pc - 1, opcode);
-                
-                // Check for breakpoints
-                if (this.gameboy.debugger.checkBreakpoint(this.r.pc - 1)) {
-                    return;
-                }
-            }
-            
-            opcodeMap[opcode](this);
-            this.r.F &= 0xF0; // tmp fix
         }
     }
 

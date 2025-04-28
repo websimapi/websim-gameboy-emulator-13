@@ -1,4 +1,4 @@
-// core.js - Updates to integrate the debugger
+// core.js - Updates for better debugger performance
 
 import { Util } from './utils.js';
 import { CPU } from './cpu.js';
@@ -42,7 +42,7 @@ export class Gameboy {
         this.input = input;
         this.pad = pad;
 
-        // Initialize debugger if enabled
+        // Initialize debugger if enabled, but in performance mode by default
         if (this.options.debugMode) {
             this.debugger = new DebugSystem(this);
         }
@@ -103,6 +103,8 @@ export class Gameboy {
             return isEnabled;
         } else {
             this.debugger = new DebugSystem(this);
+            // Make sure it's in performance mode by default
+            this.debugger.performanceMode = true;
             this.debugger.toggle();
             return true;
         }

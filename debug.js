@@ -1,4 +1,4 @@
-// debug.js - Comprehensive debugging tools for GameboyJS
+// debug.js - Optimized debugging tools for GameboyJS
 
 export class DebugSystem {
   constructor(gameboy) {
@@ -16,6 +16,13 @@ export class DebugSystem {
     this.paused = false;
     this.stepMode = false;
     this.lastOpcodes = new Array(10).fill({address: 0, opcode: 0});
+    
+    // Performance optimizations
+    this.throttleInterval = 250; // Update UI every 250ms instead of every frame
+    this.lastUIUpdate = 0;
+    this.uiUpdateScheduled = false;
+    this.performanceMode = true; // Default to performance-focused debugging
+    
     this.createDebugUI();
   }
 
@@ -35,6 +42,7 @@ export class DebugSystem {
             <button id="debug-pause">Pause</button>
             <button id="debug-step">Step</button>
             <button id="debug-continue">Continue</button>
+            <button id="toggle-perf-mode">${this.performanceMode ? 'Detailed Mode' : 'Performance Mode'}</button>
           </div>
         </div>
         <div class="debug-body">
@@ -46,11 +54,11 @@ export class DebugSystem {
             <h4>Performance</h4>
             <div id="performance-metrics"></div>
           </div>
-          <div class="debug-section">
+          <div class="debug-section performance-heavy" ${this.performanceMode ? 'style="display:none"' : ''}>
             <h4>Execution</h4>
             <div id="opcode-history"></div>
           </div>
-          <div class="debug-section">
+          <div class="debug-section performance-heavy" ${this.performanceMode ? 'style="display:none"' : ''}>
             <h4>Memory Viewer</h4>
             <input type="text" id="memory-address" placeholder="Address (hex)">
             <button id="view-memory">View</button>
@@ -229,6 +237,26 @@ export class DebugSystem {
         this.displayMemory(addr);
       }
     });
+    
+    document.getElementById('toggle-perf-mode').addEventListener('click', () => {
+      this.performanceMode = !this.performanceMode;
+      this.togglePerformanceMode();
+    });
+  }
+  
+  togglePerformanceMode() {
+    const perfElements = document.querySelectorAll('.performance-heavy');
+    const toggleButton = document.getElementById('toggle-perf-mode');
+    
+    perfElements.forEach(el => {
+      el.style.display = this.performanceMode ? 'none' : 'block';
+    });
+    
+    if (toggleButton) {
+      toggleButton.textContent = this.performanceMode ? 'Detailed Mode' : 'Performance Mode';
+    }
+    
+    this.log(`Switched to ${this.performanceMode ? 'performance' : 'detailed'} debug mode`);
   }
 
   toggle() {
@@ -237,6 +265,10 @@ export class DebugSystem {
     if (debugPanel) {
       debugPanel.style.display = this.enabled ? 'block' : 'none';
     }
+    
+    // Reset UI update timer when toggling
+    this.lastUIUpdate = 0;
+    
     return this.enabled;
   }
 
@@ -244,7 +276,7 @@ export class DebugSystem {
     this.paused = true;
     this.gameboy.pause(true);
     this.log('Execution paused');
-    this.updateUI();
+    this.updateUI(true); // Force immediate UI update when pausing
   }
 
   continueExecution() {
@@ -258,7 +290,7 @@ export class DebugSystem {
     if (this.paused) {
       this.stepMode = true;
       this.gameboy.cpu.executeSingleInstruction();
-      this.updateUI();
+      this.updateUI(true); // Force update after step
       this.log('Executed single instruction at 0x' + this.gameboy.cpu.r.pc.toString(16));
     }
   }
@@ -283,6 +315,8 @@ export class DebugSystem {
   }
 
   updateBreakpointDisplay() {
+    if (!this.enabled) return;
+    
     const bpList = document.getElementById('breakpoint-list');
     if (bpList) {
       bpList.innerHTML = '';
@@ -305,12 +339,21 @@ export class DebugSystem {
   }
 
   recordOpcode(address, opcode) {
-    this.lastOpcodes.shift();
-    this.lastOpcodes.push({ address, opcode });
+    if (!this.enabled) return;
+    
+    // Always count instructions for metrics
     this.metrics.instructionCount++;
+    
+    // Only track opcode history if not in performance mode
+    if (!this.performanceMode) {
+      this.lastOpcodes.shift();
+      this.lastOpcodes.push({ address, opcode });
+    }
   }
 
-  updatePerformanceMetrics(frameTime) {
+  updatePerformanceMetrics() {
+    if (!this.enabled) return;
+    
     const now = performance.now();
     const elapsed = now - this.metrics.lastFrameTime;
     this.metrics.lastFrameTime = now;
@@ -323,15 +366,11 @@ export class DebugSystem {
     // Calculate average FPS from the last 60 frames
     const avgFrameTime = this.metrics.frameTime.reduce((a, b) => a + b, 0) / this.metrics.frameTime.length;
     this.metrics.avgFps = 1000 / avgFrameTime;
-    
-    // Update UI
-    const perfElement = document.getElementById('performance-metrics');
-    if (perfElement) {
-      perfElement.textContent = `FPS: ${this.metrics.avgFps.toFixed(2)} | Instructions: ${this.metrics.instructionCount}`;
-    }
   }
 
   displayMemory(address) {
+    if (!this.enabled || this.performanceMode) return;
+    
     address = address & 0xFFF0; // Align to 16-byte boundary
     const memDisplay = document.getElementById('memory-display');
     if (memDisplay) {
@@ -364,6 +403,8 @@ export class DebugSystem {
   }
 
   updateRegistersDisplay() {
+    if (!this.enabled) return;
+    
     const regDisplay = document.getElementById('cpu-registers');
     if (regDisplay) {
       const cpu = this.gameboy.cpu;
@@ -379,6 +420,8 @@ export class DebugSystem {
   }
 
   updateOpcodeHistory() {
+    if (!this.enabled || this.performanceMode) return;
+    
     const historyDisplay = document.getElementById('opcode-history');
     if (historyDisplay) {
       let html = '';
@@ -402,11 +445,16 @@ export class DebugSystem {
       this.logHistory.shift();
     }
     
-    this.updateLogDisplay();
+    if (this.enabled) {
+      this.updateLogDisplay();
+    }
+    
     console.log(`[DEBUG] ${message}`);
   }
 
   updateLogDisplay() {
+    if (!this.enabled) return;
+    
     const logDisplay = document.getElementById('debug-log');
     if (logDisplay) {
       let html = '';
@@ -415,21 +463,55 @@ export class DebugSystem {
         html += `<div>[${timeString}] ${entry.message}</div>`;
       }
       logDisplay.innerHTML = html;
+      
+      // Auto-scroll to bottom
+      logDisplay.scrollTop = logDisplay.scrollHeight;
     }
   }
 
-  updateUI() {
-    if (this.enabled) {
-      this.updateRegistersDisplay();
+  updateUI(force = false) {
+    if (!this.enabled) return;
+    
+    const now = performance.now();
+    
+    // Throttle UI updates to avoid performance hit
+    if (!force && now - this.lastUIUpdate < this.throttleInterval) {
+      // If update already scheduled, don't schedule another one
+      if (!this.uiUpdateScheduled) {
+        this.uiUpdateScheduled = true;
+        requestAnimationFrame(() => {
+          this.updateUI();
+          this.uiUpdateScheduled = false;
+        });
+      }
+      return;
+    }
+    
+    this.lastUIUpdate = now;
+    
+    // Only update what's necessary based on performance mode
+    this.updateRegistersDisplay();
+    
+    // Update performance metrics display
+    const perfElement = document.getElementById('performance-metrics');
+    if (perfElement) {
+      perfElement.textContent = `FPS: ${this.metrics.avgFps.toFixed(2)} | Instructions: ${this.metrics.instructionCount}`;
+    }
+    
+    // Heavy updates only if not in performance mode
+    if (!this.performanceMode) {
       this.updateOpcodeHistory();
       this.displayMemory(this.gameboy.cpu.r.pc);
     }
+    
+    // Always update log
+    this.updateLogDisplay();
   }
 
   handleError(error, context) {
     this.log(`ERROR: ${error.message} in ${context}`);
     this.pauseExecution();
-    this.updateUI();
+    this.updateUI(true); // Force immediate update on errors
     
     // Show error in UI
     const errorDetails = document.createElement('div');
