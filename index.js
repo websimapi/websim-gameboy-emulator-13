@@ -1,39 +1,34 @@
-// Entry point for the GameboyJS emulator
-// This file will import all modules and export the public API
+// GameboyJS - Modular Gameboy Emulator
+// Main entry point that exposes the public API
 
-// Import dependencies
-import { Gameboy } from './gameboy.js';
-import { RomFileReader, RomDropFileReader } from './rom.js';
-import { Keyboard, Gamepad } from './input.js';
-import { Util, Debug } from './util.js';
+// For now, we're importing from the monolithic gameboy.js
+// As we create individual module files, we'll update these imports
+import './gameboy.js';
 
-// Re-export public classes and functions
-const GameboyJS = {
-  // Core
-  Gameboy,
-  CPU: require('./gameboy.js').CPU,
-  
-  // ROM
-  RomFileReader,
-  RomDropFileReader,
-  
-  // Input
-  Keyboard,
-  Gamepad,
-  
-  // Utilities
-  Util,
-  Debug,
-  
-  // Add more exports as modules are created
-  Screen: require('./screen.js').Screen,
-  Memory: require('./memory.js').Memory,
-  APU: require('./apu.js').APU,
-  Timer: require('./timer.js').Timer,
-  Channel1: require('./channel1.js').Channel1,
-  Channel3: require('./channel3.js').Channel3,
-  Channel4: require('./channel4.js').Channel4,
-};
+// Create our namespace and expose the public API
+const GameboyJS = window.GameboyJS || {};
 
-// Export the main namespace
+// Export the main classes
+export const Gameboy = GameboyJS.Gameboy;
+export const CPU = GameboyJS.CPU;
+export const GPU = GameboyJS.GPU;
+export const Screen = GameboyJS.Screen;
+export const Memory = GameboyJS.Memory;
+export const Input = GameboyJS.Input;
+export const Keyboard = GameboyJS.Keyboard;
+export const Gamepad = GameboyJS.Gamepad;
+export const APU = GameboyJS.APU;
+export const Timer = GameboyJS.Timer;
+
+// Export ROM-related classes
+export const Rom = GameboyJS.Rom;
+export const RomFileReader = GameboyJS.RomFileReader;
+export const RomDropFileReader = GameboyJS.RomDropFileReader;
+export const RomAjaxReader = GameboyJS.RomAjaxReader;
+
+// Export utility classes and functions
+export const Util = GameboyJS.Util;
+export const Debug = GameboyJS.Debug;
+
+// Export the default object for convenience
 export default GameboyJS;
