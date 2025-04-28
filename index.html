@@ -182,16 +182,16 @@
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
 
 <p class="commands">
-    <button onclick="g.pause(true);">Pause</button>
-    <button onclick="g.pause(false);">Run</button>
+    <button id="pause-btn" onclick="window.g && g.pause(true);">Pause</button>
+    <button id="run-btn" onclick="window.g && g.pause(false);">Run</button>
 </p>
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="window.g && g.setSoundEnabled(this.checked);"/> Enable sound</label>
 </p>
 <p class="commands">
     <label>
         Screen zoom
-        <select id="screen-zoom" onchange="g.setScreenZoom(this.value);">
+        <select id="screen-zoom" onchange="window.g && g.setScreenZoom(this.value);">
             <option value="1">1</option>
             <option value="2" selected>2</option>
             <option value="3">3</option>
