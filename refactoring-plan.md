@@ -88,20 +88,33 @@
    - Extracted MBC implementations
    - Extracted ExtRam handling
 
-## Next Files to Work On
-1. **gpu.js** - Extract GPU implementation
-   - Extract the GPU class
-   - Implement tile and sprite rendering
-   - Implement background and window handling
+6. **gpu.js** - Extracted GPU implementation
+   - Extracted the GPU class
+   - Implemented tile and sprite rendering
+   - Implemented background and window handling
 
-2. **screen.js** - Extract screen rendering
-   - Implement the Screen class
+7. **screen.js** - Extracted screen rendering
+   - Implemented the Screen class
    - Set up canvas manipulation
-   - Handle screen scaling
+   - Handled screen scaling
 
-3. **input.js** - Extract input handling
-   - Implement Input class
-   - Extract Keyboard and Gamepad handlers
+8. **input.js** - Extracted input handling
+   - Implemented Input class
+   - Extracted Keyboard and Gamepad handlers
+
+## Next Files to Work On
+1. **audio.js** - Extract audio processing
+   - Implement the APU class
+   - Extract sound channel implementations
+   - Set up audio context management
+
+2. **timer.js** - Extract timer functionality
+   - Implement the Timer class
+   - Handle timer registers
+
+3. **rom.js** - Extract ROM handling
+   - Implement ROM class and validation
+   - Extract ROM readers
 
 ## Implementation Strategy
 - For each module, we'll extract the relevant code from gameboy.js
@@ -115,3 +128,4 @@
 - Resolved circular dependency between core.js and constants.js
 - HTML has been updated to use ES modules
 - Audio initialization has been improved with permission handling
+- Graphics and input systems have been modularized

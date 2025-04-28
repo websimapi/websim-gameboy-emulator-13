@@ -182,6 +182,7 @@
 <script type="module">
 // Import the GameboyJS namespace
 import GameboyJS from 'gameboy';
+import { Keyboard } from './input.js';
 
 // Audio context initialization
 let audioContext = null;
@@ -216,6 +217,7 @@ document.getElementById('enable-audio').addEventListener('click', function() {
 // configuration
 function setupGameboy() {
     var opts = {
+        pad: {class: Keyboard, mapping: null},
         romReaders: [
             new GameboyJS.RomFileReader(),
             new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
