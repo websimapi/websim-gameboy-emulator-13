@@ -136,10 +136,7 @@
         }
     </style>
     
-    <!-- Original implementation script (will be conditional) -->
-    <script id="original-script" type="text/javascript"></script>
-    
-    <!-- New implementation import map (will be conditional) -->
+    <!-- New implementation import map -->
     <script id="importmap-script" type="importmap">
     {
       "imports": {
@@ -158,6 +155,11 @@
         "./cpu-operations.js": "./cpu-operations.js",
         "./bootrom.js": "./bootrom.js",
         "./opcodes.js": "./opcodes.js",
+        "./opcodes/opcodes-base.js": "./opcodes/opcodes-base.js",
+        "./opcodes/opcodes-load.js": "./opcodes/opcodes-load.js",
+        "./opcodes/opcodes-alu.js": "./opcodes/opcodes-alu.js",
+        "./opcodes/opcodes-control.js": "./opcodes/opcodes-control.js",
+        "./opcodes/opcodes-cb.js": "./opcodes/opcodes-cb.js",
         "./hardware-constants.js": "./hardware-constants.js"
       }
     }
@@ -263,7 +265,7 @@ toggleSwitch.addEventListener('change', function() {
 // Load the appropriate implementation
 if (useOriginal) {
     // Load original implementation
-    const script = document.getElementById('original-script');
+    const script = document.createElement('script');
     script.src = "./gameboy.js";
     
     // Initialize after script loads
@@ -279,6 +281,7 @@ if (useOriginal) {
         g.setSoundEnabled(document.getElementById('sound-enable').checked);
         g.setScreenZoom(document.getElementById('screen-zoom').value);
     };
+    document.body.appendChild(script);
 } else {
     // Load refactored implementation with ES modules
     const moduleScript = document.createElement('script');
