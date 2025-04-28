@@ -7,7 +7,7 @@ import { Memory, MBC } from './memory.js';
 import { GPU } from './gpu.js';
 import { Screen } from './screen.js';
 import { Input, Keyboard, Gamepad } from './input.js';
-import { APU, Channel1, Channel3, Channel4 } from './audio.js';
+import { APU, Channel1, Channel2, Channel3, Channel4 } from './audio.js';
 import { Timer } from './timer.js';
 import { Rom, RomFileReader, RomDropFileReader, RomAjaxReader } from './rom.js';
 import { Util, Debug, UnimplementedException, ConsoleSerial, DummySerial } from './utils.js';
@@ -36,6 +36,7 @@ const GameboyJS = {
   // Audio
   APU,
   Channel1,
+  Channel2,
   Channel3,
   Channel4,
   
@@ -77,7 +78,7 @@ export {
   Memory, MBC,
   GPU, Screen,
   Input, Keyboard, Gamepad,
-  APU, Channel1, Channel3, Channel4,
+  APU, Channel1, Channel2, Channel3, Channel4,
   Timer,
   Rom, RomFileReader, RomDropFileReader, RomAjaxReader,
   Util, Debug, UnimplementedException, ConsoleSerial, DummySerial,

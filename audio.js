@@ -1,5 +1,5 @@
 // audio.js - Audio Processing Unit and sound channels implementation
-// Now interfaces with Web Worker for audio processing
+// Updated to use AudioWorkletNode instead of deprecated ScriptProcessorNode
 
 import { Util } from './utils.js';
 
@@ -14,7 +14,7 @@ export class APU {
         this.worker = null;
         this.audioBuffer = [];
         this.audioBufferSize = 4096;
-        this.scriptNode = null;
+        this.workletNode = null;
         this.gainNode = null;
         
         // Create channels with empty objects that will forward to worker
@@ -38,15 +38,51 @@ export class APU {
             this.gainNode = this.audioContext.createGain();
             this.gainNode.gain.value = 0.5;
             
-            // Set up script processor node for custom audio processing
-            this.scriptNode = this.audioContext.createScriptProcessor(2048, 0, 1);
-            this.scriptNode.onaudioprocess = this.handleAudioProcess.bind(this);
-            
-            // Connect audio graph
-            this.scriptNode.connect(this.gainNode);
-            this.gainNode.connect(this.audioContext.destination);
+            // Set up audio worklet instead of script processor
+            this.initAudioWorklet();
         } catch (e) {
             console.error("Web Audio API is not supported in this browser", e);
+        }
+    }
+    
+    async initAudioWorklet() {
+        try {
+            // Load and register the audio worklet processor
+            await this.audioContext.audioWorklet.addModule('gameboy-audio-processor.js');
+            
+            // Create worklet node
+            this.workletNode = new AudioWorkletNode(this.audioContext, 'gameboy-audio-processor', {
+                numberOfInputs: 0,
+                numberOfOutputs: 1,
+                outputChannelCount: [1]
+            });
+            
+            // Set up message port communication between main thread and worklet
+            this.workletNode.port.onmessage = (event) => {
+                if (event.data.type === 'needSamples') {
+                    // Request more samples from worker when worklet needs them
+                    if (this.enabled && this.worker) {
+                        this.worker.postMessage({
+                            type: 'process',
+                            clockElapsed: 4194304 / this.audioContext.sampleRate * 128 // Clock cycles for 128 samples
+                        });
+                    }
+                }
+            };
+            
+            // Connect audio graph
+            this.workletNode.connect(this.gainNode);
+            this.gainNode.connect(this.audioContext.destination);
+            
+            // Start the worklet processor
+            this.workletNode.port.postMessage({
+                type: 'init',
+                sampleRate: this.audioContext.sampleRate
+            });
+        } catch (e) {
+            console.error("AudioWorklet failed to initialize:", e);
+            // Fall back to worker-only approach
+            console.warn("Falling back to simple worker implementation");
         }
     }
     
@@ -73,6 +109,14 @@ export class APU {
                     if (this.audioBuffer.length > this.audioBufferSize) {
                         this.audioBuffer.shift();
                     }
+                    
+                    // Forward audio data to the worklet
+                    if (this.workletNode) {
+                        this.workletNode.port.postMessage({
+                            type: 'audioData',
+                            samples: this.audioBuffer.splice(0, Math.min(128, this.audioBuffer.length))
+                        });
+                    }
                     break;
                     
                 case 'channelStatusUpdate':
@@ -86,27 +130,6 @@ export class APU {
                     break;
             }
         };
-    }
-    
-    handleAudioProcess(e) {
-        // Fill output buffer with data from our audio buffer
-        const outputBuffer = e.outputBuffer.getChannelData(0);
-        
-        for (let i = 0; i < outputBuffer.length; i++) {
-            if (this.audioBuffer.length > 0) {
-                outputBuffer[i] = this.audioBuffer.shift();
-            } else {
-                outputBuffer[i] = 0;
-            }
-        }
-        
-        // Request more audio data from worker
-        if (this.enabled) {
-            this.worker.postMessage({
-                type: 'process',
-                clockElapsed: outputBuffer.length / this.audioContext.sampleRate * 4194304 // Convert to GB cycles
-            });
-        }
     }
     
     updateChannelFrequency(channelNum, frequency) {
@@ -483,3 +506,6 @@ export class Channel4 extends WorkerChannelBase {
         });
     }
 }
+
+// Export the channel classes so they can be used in imports
+export { Channel1, Channel2, Channel3, Channel4 };
