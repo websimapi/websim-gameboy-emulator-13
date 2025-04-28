@@ -123,7 +123,10 @@ export const cpuOps = {
     _SWAPn: function(p, n){p.r.F = n==0?0x80:0;return ((n&0xF0) >> 4) | ((n&0x0F) << 4);},
     
     // Jump operations - the JPnn function was missing
-    JPnn:   function(p) {p.wr('pc', (p.memory.rb(p.r.pc+1) << 8) + p.memory.rb(p.r.pc));p.clock.c += 16;},
+    JPnn: function(p) {
+        p.wr('pc', (p.memory.rb(p.r.pc+1) << 8) + p.memory.rb(p.r.pc));
+        p.clock.c += 16;
+    },
     JRccn:  function(p, cc) {if (Util.testFlag(p, cc)){var v=p.memory.rb(p.r.pc++);v=Util.getSignedValue(v);p.r.pc += v;p.clock.c+=4;}else{p.r.pc++;}p.clock.c += 8;},
     JPccnn: function(p, cc) {if (Util.testFlag(p, cc)){p.wr('pc', (p.memory.rb(p.r.pc+1) << 8) + p.memory.rb(p.r.pc));p.clock.c+=4;}else{p.r.pc+=2;}p.clock.c += 12;},
     JPrr:   function(p, r1, r2) {p.r.pc = (p.r[r1] << 8) + p.r[r2];p.clock.c += 4;},
