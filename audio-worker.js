@@ -1,5 +1,13 @@
 // audio-worker.js - Web Worker for audio processing
 
+// Send any errors to the main thread
+self.addEventListener('error', function(e) {
+  self.postMessage({
+    type: 'error',
+    message: e.message
+  });
+});
+
 // Audio state and processing logic
 let audioState = {
   channels: {
@@ -15,9 +23,22 @@ let audioState = {
   sweepStepLength: 0x8000 // 1 / 128 seconds of instructions
 };
 
+// Send startup message to indicate worker is ready
+self.postMessage({
+  type: 'state',
+  data: {
+    channels: {
+      1: { playing: false, frequency: 0, volume: 0 },
+      2: { playing: false, frequency: 0, volume: 0 },
+      3: { playing: false, frequency: 0, waveBuffer: Array.from(audioState.channels[3].waveBuffer) },
+      4: { playing: false }
+    }
+  }
+});
+
 // Process audio updates based on elapsed clock cycles
 function processAudio(elapsedCycles) {
-  if (!audioState.enabled) return;
+  if (!audioState.enabled) return null;
   
   // Process each channel
   for (let channelNum = 1; channelNum <= 4; channelNum++) {
@@ -63,12 +84,14 @@ function updateChannel(channel, channelNum, elapsedCycles) {
         return;
       }
       
-      channel.frequency = newFreq;
+      if (channel.sweepShifts > 0) {
+        channel.frequency = newFreq;
+      }
     }
   }
   
   // Process envelope for channels 1, 2, 4
-  if (channelNum <= 2 && channel.envelopeStep > 0 && 
+  if ((channelNum <= 2 || channelNum === 4) && channel.envelopeStep > 0 && 
       channel.clockEnvelop > audioState.envelopeStepLength) {
     channel.clockEnvelop -= audioState.envelopeStepLength;
     channel.envelopeStep--;
@@ -86,7 +109,7 @@ function updateChannel(channel, channelNum, elapsedCycles) {
     if (channel.clockLength > audioState.soundLengthUnit) {
       channel.soundLength--;
       channel.clockLength -= audioState.soundLengthUnit;
-      if (channel.soundLength === 0) {
+      if (channel.soundLength <= 0) {
         channel.playing = false;
       }
     }
@@ -106,31 +129,38 @@ function getChannelState(channelNum) {
 
 // Process register writes
 function writeRegister(address, value) {
-  audioState.registers[address] = value;
-  
-  // Channel 1 registers
-  if (address >= 0xFF10 && address <= 0xFF14) {
-    handleChannel1Register(address, value);
-  } 
-  // Channel 2 registers
-  else if (address >= 0xFF16 && address <= 0xFF19) {
-    handleChannel2Register(address, value);
-  }
-  // Channel 3 registers
-  else if (address >= 0xFF1A && address <= 0xFF1E) {
-    handleChannel3Register(address, value);
-  }
-  // Channel 4 registers
-  else if (address >= 0xFF20 && address <= 0xFF23) {
-    handleChannel4Register(address, value);
-  }
-  // Wave pattern data
-  else if (address >= 0xFF30 && address <= 0xFF3F) {
-    handleWaveData(address, value);
-  }
-  // Global audio control
-  else if (address === 0xFF26) {
-    audioState.enabled = (value & 0x80) !== 0;
+  try {
+    audioState.registers[address] = value;
+    
+    // Channel 1 registers
+    if (address >= 0xFF10 && address <= 0xFF14) {
+      handleChannel1Register(address, value);
+    } 
+    // Channel 2 registers
+    else if (address >= 0xFF16 && address <= 0xFF19) {
+      handleChannel2Register(address, value);
+    }
+    // Channel 3 registers
+    else if (address >= 0xFF1A && address <= 0xFF1E) {
+      handleChannel3Register(address, value);
+    }
+    // Channel 4 registers
+    else if (address >= 0xFF20 && address <= 0xFF23) {
+      handleChannel4Register(address, value);
+    }
+    // Wave pattern data
+    else if (address >= 0xFF30 && address <= 0xFF3F) {
+      handleWaveData(address, value);
+    }
+    // Global audio control
+    else if (address === 0xFF26) {
+      audioState.enabled = (value & 0x80) !== 0;
+    }
+  } catch (e) {
+    self.postMessage({
+      type: 'error',
+      message: 'Error processing register write: ' + e.message
+    });
   }
 }
 
@@ -205,6 +235,9 @@ function handleChannel3Register(address, value) {
   switch (address) {
     case 0xFF1A: // NR30: DAC power
       // Channel on/off
+      if ((value & 0x80) === 0) {
+        channel.playing = false;
+      }
       break;
     case 0xFF1B: // NR31: Length
       channel.soundLength = 256 - value;
@@ -235,7 +268,9 @@ function handleChannel4Register(address, value) {
       channel.soundLength = 64 - (value & 0x3F);
       break;
     case 0xFF21: // NR42: Envelope
-      // Envelope parameters
+      channel.envelopeSign = (value & 0x08) ? 1 : -1;
+      channel.volume = (value & 0xF0) >> 4;
+      channel.envelopeStep = (value & 0x07);
       break;
     case 0xFF22: // NR43: Polynomial counter
       // Noise parameters
@@ -245,6 +280,7 @@ function handleChannel4Register(address, value) {
       if (value & 0x80) {
         channel.playing = true;
         channel.clockLength = 0;
+        channel.clockEnvelop = 0;
       }
       break;
   }
@@ -256,44 +292,59 @@ function handleWaveData(address, value) {
   const channel = audioState.channels[3];
   
   // Each byte contains two samples
-  channel.waveBuffer[index * 2] = (value >> 4) / 8 - 1;
-  channel.waveBuffer[index * 2 + 1] = (value & 0x0F) / 8 - 1;
+  if (index >= 0 && index < 16) {
+    channel.waveBuffer[index * 2] = (value >> 4) / 8 - 1;
+    channel.waveBuffer[index * 2 + 1] = (value & 0x0F) / 8 - 1;
+  }
 }
 
 // Message handler for worker
 self.onmessage = function(e) {
-  const message = e.data;
-  
-  switch (message.type) {
-    case 'update':
-      // Process audio with elapsed cycles
-      const result = processAudio(message.elapsedCycles);
-      self.postMessage({ type: 'state', data: result });
-      break;
-      
-    case 'write':
-      // Handle register write
-      writeRegister(message.address, message.value);
-      break;
-      
-    case 'play':
-      // Start channel playback
-      audioState.channels[message.channel].playing = true;
-      audioState.channels[message.channel].clockLength = 0;
-      audioState.channels[message.channel].clockEnvelop = 0;
-      if (message.channel === 1) {
-        audioState.channels[message.channel].clockSweep = 0;
-      }
-      break;
-      
-    case 'stop':
-      // Stop channel playback
-      audioState.channels[message.channel].playing = false;
-      break;
-      
-    case 'enable':
-      // Enable/disable audio processing
-      audioState.enabled = message.value;
-      break;
+  try {
+    const message = e.data;
+    
+    switch (message.type) {
+      case 'update':
+        // Process audio with elapsed cycles
+        const result = processAudio(message.elapsedCycles);
+        if (result) {
+          self.postMessage({ type: 'state', data: result });
+        }
+        break;
+        
+      case 'write':
+        // Handle register write
+        writeRegister(message.address, message.value);
+        break;
+        
+      case 'play':
+        // Start channel playback
+        if (message.channel >= 1 && message.channel <= 4) {
+          audioState.channels[message.channel].playing = true;
+          audioState.channels[message.channel].clockLength = 0;
+          audioState.channels[message.channel].clockEnvelop = 0;
+          if (message.channel === 1) {
+            audioState.channels[message.channel].clockSweep = 0;
+          }
+        }
+        break;
+        
+      case 'stop':
+        // Stop channel playback
+        if (message.channel >= 1 && message.channel <= 4) {
+          audioState.channels[message.channel].playing = false;
+        }
+        break;
+        
+      case 'enable':
+        // Enable/disable audio processing
+        audioState.enabled = message.value;
+        break;
+    }
+  } catch (e) {
+    self.postMessage({
+      type: 'error',
+      message: 'Error in worker message handler: ' + e.message
+    });
   }
 };
