@@ -506,6 +506,3 @@ export class Channel4 extends WorkerChannelBase {
         });
     }
 }
-
-// Export the channel classes so they can be used in imports
-export { Channel1, Channel2, Channel3, Channel4 };
