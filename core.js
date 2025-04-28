@@ -6,7 +6,6 @@ import { Screen } from './screen.js';
 import { GPU } from './gpu.js';
 import { Input } from './input.js';
 import { Rom } from './rom.js';
-import { APU } from './audio.js';
 import { UnimplementedException } from './utils.js';
 import { loadboot } from './bootrom.js';
 
@@ -17,11 +16,10 @@ const defaultOptions = {
     romReaders: [],
     statusContainerId: 'status',
     gameNameContainerId: 'game-name',
-    errorContainerId: 'error',
-    useAudioWorker: true // New option for audio worker support
+    errorContainerId: 'error'
 };
 
-// Gameboy class
+// Gameboy class with improved initialization and error handling
 export class Gameboy {
     constructor(canvas, options) {
         options = options || {};
@@ -121,15 +119,17 @@ export class Gameboy {
         this.screen.setPixelSize(value);
     }
     
+    // Improved error handling for exceptions
     handleException(e) {
         if (e instanceof UnimplementedException) {
             if (e.fatal) {
                 this.error('This cartridge is not supported ('+ e.message +')');
             } else {
-                console.error(e.message);
+                console.error(`Non-fatal error: ${e.message}`);
             }
         } else {
-            throw e;
+            console.error('Unhandled exception:', e);
+            this.error(`Error during emulation: ${e.message || 'Unknown error'}`);
         }
     }
 }

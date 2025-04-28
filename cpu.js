@@ -8,20 +8,17 @@ import { ConsoleSerial } from './utils.js';
 import { loadboot } from './bootrom.js';
 import { cpuOps } from './cpu-operations.js';
 
-// CPU class
+// CPU class with improved error handling and timing
 export class CPU {
     constructor(gameboy) {
         this.gameboy = gameboy;
 
         this.r = {A:0, F: 0, B:0, C:0, D:0, E:0, H:0, L:0, pc:0, sp:0};
         this.IME = true;
-        this.clock = {c: 0, serial: 0, audio: 0}; 
+        this.clock = {c: 0, serial: 0};
         this.isHalted = false;
         this.isPaused = false;
         this.usingBootRom = false;
-        
-        // Audio processing rate - how often to send updates to audio worker
-        this.AUDIO_UPDATE_RATE = 4000; 
 
         this.createDevices();
     }
@@ -43,7 +40,7 @@ export class CPU {
         this.timer = new Timer(this, this.memory);
         this.apu = new APU(this.memory);
 
-        this.SERIAL_INTERNAL_INSTR = 512; 
+        this.SERIAL_INTERNAL_INSTR = 512; // instr to wait per bit if internal clock
         this.enableSerial = 0;
         this.serialHandler = ConsoleSerial;
     }
@@ -98,8 +95,7 @@ export class CPU {
         clearTimeout(this.nextFrameTimer);
     }
 
-    // Fetch-and-execute loop
-    // Will execute instructions for the duration of a frame
+    // Fetch-and-execute loop with better error handling
     frame() {
         if (!this.isPaused) {
             this.nextFrameTimer = setTimeout(this.frame.bind(this), 1000 / 60); 
@@ -111,8 +107,17 @@ export class CPU {
                 var oldInstrCount = this.clock.c;
                 if (!this.isHalted) {
                     var opcode = this.fetchOpcode();
-                    opcodeMap[opcode](this);
-                    this.r.F &= 0xF0; 
+                    
+                    // Check if opcode exists before execution
+                    if (opcode !== null && opcodeMap[opcode]) {
+                        opcodeMap[opcode](this);
+                        this.r.F &= 0xF0; // tmp fix
+                    } else {
+                        // Log problematic opcode for debugging
+                        console.error(`Invalid opcode ${opcode?.toString(16)} at address ${(this.r.pc-1).toString(16)}`);
+                        this.stop();
+                        break;
+                    }
 
                     if (this.enableSerial) {
                         var instr = this.clock.c - oldInstrCount;
@@ -129,18 +134,13 @@ export class CPU {
                 vblank = this.gpu.update(elapsed);
                 this.timer.update(elapsed);
                 this.input.update();
-                
-                // Update audio clock and check for audio updates
-                this.clock.audio += elapsed;
-                if (this.clock.audio >= this.AUDIO_UPDATE_RATE) {
-                    this.apu.update(this.clock.audio);
-                    this.clock.audio = 0;
-                }
-                
+                this.apu.update(elapsed);
                 this.checkInterrupt();
             }
             this.clock.c = 0;
         } catch (e) {
+            // Improve error handling with more context
+            console.error("Error during CPU execution:", e);
             this.gameboy.handleException(e);
         }
     }
@@ -201,7 +201,7 @@ export class CPU {
                 IFval &= (0xFF - (1<<i));
                 this.memory.wb(0xFF0F, IFval);
                 this.disableInterrupts();
-                this.clock.c += 4; 
+                this.clock.c += 4; // 20 clocks to serve interrupt, with 16 for RSTn
                 CPU.interruptRoutines[i](this);
                 break;
             }

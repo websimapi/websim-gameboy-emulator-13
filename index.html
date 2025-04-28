@@ -193,7 +193,7 @@
     <button onclick="g.pause(false);">Run</button>
 </p>
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
 </p>
 <p class="commands">
     <label>
@@ -261,13 +261,6 @@ toggleSwitch.addEventListener('change', function() {
     localStorage.setItem('useOriginalImplementation', (!this.checked).toString());
     location.reload(); // Reload the page to apply the change
 });
-
-// Check Web Worker support
-if (typeof Worker === 'undefined') {
-    console.warn('Web Workers are not supported in this browser. Audio performance may be affected.');
-    document.getElementById('error').classList.remove('hide');
-    document.getElementById('error').textContent = 'Web Workers are not supported in this browser. Audio performance may be affected.';
-}
 
 // Load the appropriate implementation
 if (useOriginal) {
