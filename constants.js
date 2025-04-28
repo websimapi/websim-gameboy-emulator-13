@@ -419,7 +419,7 @@ export const opcodeCbmap = {
 
   0x80: function(p){cpuOps.RESir(p, 0, 'B');},
   0x81: function(p){cpuOps.RESir(p, 0, 'C');},
-  0x82: function(p){cpu!Ops.RESir(p, 0, 'D');},
+  0x82: function(p){cpuOps.RESir(p, 0, 'D');},
   0x83: function(p){cpuOps.RESir(p, 0, 'E');},
   0x84: function(p){cpuOps.RESir(p, 0, 'H');},
   0x85: function(p){cpuOps.RESir(p, 0, 'L');},
