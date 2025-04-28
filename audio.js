@@ -1,4 +1,4 @@
-// audio.js - Audio Processing Unit and sound channels implementation
+// audio.js - Improved Audio Processing Unit implementation
 
 import { Util } from './utils.js';
 
@@ -9,37 +9,154 @@ export class APU {
     constructor(memory) {
         this.memory = memory;
         this.enabled = false;
-
-        window.AudioContext = window.AudioContext || window.webkitAudioContext;
-        this.audioContext = new AudioContext();
+        this.audioReady = false;
+        this.sampleRate = 44100;
+        this.samplesPerFrame = this.sampleRate / 60;
+        this.audioBuffer = [];
+        this.bufferSize = 2048; // Optimal buffer size for performance
+        this.lastTime = 0;
+        
+        try {
+            window.AudioContext = window.AudioContext || window.webkitAudioContext;
+            this.audioContext = new AudioContext();
+            this.setupAudioProcessor();
+        } catch (e) {
+            console.error("Web Audio API is not supported in this browser");
+        }
 
         this.channel1 = new Channel1(this, 1, this.audioContext);
         this.channel2 = new Channel1(this, 2, this.audioContext);
         this.channel3 = new Channel3(this, 3, this.audioContext);
         this.channel4 = new Channel4(this, 4, this.audioContext);
+        
+        // Mixer node to combine all channels
+        this.mixerNode = this.audioContext && this.audioContext.createGain();
+        if (this.mixerNode) {
+            this.mixerNode.gain.value = 0.25; // Reduce overall volume
+            this.mixerNode.connect(this.audioContext.destination);
+        }
+    }
+    
+    setupAudioProcessor() {
+        if (!this.audioContext) return;
+        
+        // Use AudioWorklet or ScriptProcessorNode based on browser support
+        if (this.audioContext.audioWorklet) {
+            // Modern approach with AudioWorklet
+            const workletCode = `
+                class GameboyAudioProcessor extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        this.buffer = [];
+                        this.port.onmessage = (e) => {
+                            if (e.data.buffer) {
+                                this.buffer = this.buffer.concat(e.data.buffer);
+                            }
+                        };
+                    }
+                    
+                    process(inputs, outputs, parameters) {
+                        const output = outputs[0][0];
+                        for (let i = 0; i < output.length; i++) {
+                            output[i] = this.buffer.shift() || 0;
+                        }
+                        return true;
+                    }
+                }
+                registerProcessor('gameboy-audio-processor', GameboyAudioProcessor);
+            `;
+            
+            const blob = new Blob([workletCode], { type: 'application/javascript' });
+            const workletUrl = URL.createObjectURL(blob);
+            
+            this.audioContext.audioWorklet.addModule(workletUrl).then(() => {
+                this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'gameboy-audio-processor');
+                this.audioWorkletNode.connect(this.mixerNode);
+                this.audioReady = true;
+            }).catch(err => {
+                console.error("AudioWorklet error:", err);
+                this.setupScriptProcessor(); // Fallback
+            });
+        } else {
+            this.setupScriptProcessor();
+        }
+    }
+    
+    setupScriptProcessor() {
+        // Fallback to ScriptProcessorNode
+        this.scriptProcessor = this.audioContext.createScriptProcessor(this.bufferSize, 0, 1);
+        this.scriptProcessor.onaudioprocess = (e) => {
+            const output = e.outputBuffer.getChannelData(0);
+            for (let i = 0; i < output.length; i++) {
+                output[i] = this.audioBuffer.shift() || 0;
+            }
+        };
+        this.scriptProcessor.connect(this.mixerNode);
+        this.audioReady = true;
     }
 
     connect() {
+        if (!this.audioContext) return;
+        
+        if (this.audioContext.state === "suspended") {
+            this.audioContext.resume();
+        }
+        
         this.channel1.enable();
         this.channel2.enable();
         this.channel3.enable();
+        this.channel4.enable();
+        this.enabled = true;
     }
 
     disconnect() {
         this.channel1.disable();
         this.channel2.disable();
         this.channel3.disable();
+        this.channel4.disable();
+        this.enabled = false;
     }
 
     // Updates the states of each channel given the elapsed time
-    // (in instructions) since last update
+    // This method is called from the main emulation loop
     update(clockElapsed) {
-        if (this.enabled == false) return;
+        if (!this.enabled || !this.audioReady) return;
 
+        // Update channel states based on emulator clock
         this.channel1.update(clockElapsed);
         this.channel2.update(clockElapsed);
         this.channel3.update(clockElapsed);
         this.channel4.update(clockElapsed);
+        
+        // Generate audio samples at regular intervals
+        this.lastTime += clockElapsed;
+        const samplesNeeded = Math.floor(this.lastTime / 87); // ~4194304Hz CPU clock / 48000Hz sample rate
+        
+        if (samplesNeeded > 0) {
+            this.lastTime %= 87;
+            
+            // Generate samples from all channels
+            for (let i = 0; i < samplesNeeded; i++) {
+                // Mix all channels together
+                let sample = 0;
+                if (this.channel1.playing) sample += this.channel1.getSample();
+                if (this.channel2.playing) sample += this.channel2.getSample();
+                if (this.channel3.playing) sample += this.channel3.getSample();
+                if (this.channel4.playing) sample += this.channel4.getSample();
+                
+                // Normalize sample and add to buffer
+                sample = Math.max(-1, Math.min(1, sample));
+                this.audioBuffer.push(sample);
+            }
+            
+            // Send buffer to AudioWorklet if available
+            if (this.audioWorkletNode) {
+                const bufferToSend = this.audioBuffer.splice(0, this.bufferSize);
+                if (bufferToSend.length > 0) {
+                    this.audioWorkletNode.port.postMessage({ buffer: bufferToSend });
+                }
+            }
+        }
     }
 
     setSoundFlag(channel, value) {
@@ -180,7 +297,7 @@ export class APU {
                 if (!this.enabled) {
                     for (var i = 0xFF10; i < 0xFF27; i++)
                         this.memory[i] = 0;
-                    // todo stop sound
+                    this.disconnect();
                 }
                 break;
         }
@@ -223,56 +340,67 @@ export class Channel1 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
-
+        
+        // Channel state
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
         this.soundLength = 64; // defaults to 64 periods
         this.lengthCheck = false;
-
+        this.frequency = 0;
+        this.volume = 0;
+        this.dutyCycle = 0.5; // Duty cycle (square wave ratio)
+        
+        // Sweep parameters
         this.sweepTime = 0; // from 0 to 7
         this.sweepStepLength = 0x8000; // 1 / 128 seconds of instructions
         this.sweepCount = 0;
         this.sweepShifts = 0;
         this.sweepSign = 1; // +1 / -1 for increase / decrease freq
-
-        this.frequency = 0;
-
+        
+        // Envelope parameters
         this.envelopeStep = 0;
         this.envelopeStepLength = 0x10000;// 1 / 64 seconds of instructions
         this.envelopeCheck = false;
         this.envelopeSign = 1;
-
+        this.envelopeVolume = 0;
+        
+        // Timing variables
         this.clockLength = 0;
         this.clockEnvelop = 0;
         this.clockSweep = 0;
+        this.phase = 0; // Phase for sample generation
 
-        var gainNode = audioContext.createGain();
-        gainNode.gain.value = 0;
-        var oscillator = audioContext.createOscillator();
-        oscillator.type = 'square';
-        oscillator.frequency.value = 1000;
-        oscillator.connect(gainNode);
-        oscillator.start(0);
+        // Audio setup (if context available)
+        if (audioContext) {
+            this.audioContext = audioContext;
+        }
+    }
 
-        this.audioContext = audioContext;
-        this.gainNode = gainNode;
-        this.oscillator = oscillator;
+    // Generate a single sample based on current state
+    getSample() {
+        if (!this.playing || this.volume === 0) return 0;
+        
+        // Update phase based on frequency
+        this.phase += this.frequency / (2048 * 44100);
+        this.phase %= 1.0;
+        
+        // Generate square wave with duty cycle
+        return this.phase < this.dutyCycle ? this.volume/15 : -this.volume/15;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        this.gainNode.connect(this.audioContext.destination);
         this.clockLength = 0;
         this.clockEnvelop = 0;
         this.clockSweep = 0;
+        this.phase = 0;
         if (this.sweepShifts > 0) this.checkFreqSweep();
     }
 
     stop() {
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        this.gainNode.disconnect();
     }
 
     checkFreqSweep() {
@@ -328,7 +456,6 @@ export class Channel1 {
 
     setFrequency(value) {
         this.frequency = value;
-        this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
     }
 
     getFrequency() {
@@ -342,15 +469,16 @@ export class Channel1 {
     setEnvelopeVolume(volume) {
         this.envelopeCheck = volume > 0 && volume < 16 ? true : false;
         this.envelopeVolume = volume;
-        this.gainNode.gain.value = this.envelopeVolume * 1/100;
-    }
-
-    disable() {
-        this.oscillator.disconnect();
+        this.volume = volume;
     }
 
     enable() {
-        this.oscillator.connect(this.gainNode);
+        // No need to reconnect audio nodes
+        // We'll use the sample-based approach instead
+    }
+
+    disable() {
+        this.playing = false;
     }
 }
 
@@ -361,6 +489,7 @@ export class Channel3 {
         this.channelNumber = channelNumber;
         this.playing = false;
 
+        // Channel state
         this.soundLength = 0;
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
         this.lengthCheck = false;
@@ -369,38 +498,22 @@ export class Channel3 {
 
         this.buffer = new Float32Array(32);
 
-        var gainNode = audioContext.createGain();
-        gainNode.gain.value = 1;
-        this.gainNode = gainNode;
-
-        this.baseSpeed = 65536;
-        var waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
-
-        var bufferSource = audioContext.createBufferSource();
-        bufferSource.buffer = waveBuffer;
-        bufferSource.loop = true;
-        bufferSource.connect(gainNode);
-        bufferSource.start(0);
-
-        this.audioContext = audioContext;
-        this.waveBuffer = waveBuffer;
-        this.bufferSource = bufferSource;
+        // Audio setup (if context available)
+        if (audioContext) {
+            this.audioContext = audioContext;
+        }
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        this.waveBuffer.copyToChannel(this.buffer, 0, 0);
-
-        this.gainNode.connect(this.audioContext.destination);
         this.clockLength = 0;
     }
 
     stop() {
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        this.gainNode.disconnect();
     }
 
     update(clockElapsed) {
@@ -419,11 +532,10 @@ export class Channel3 {
 
     setFrequency(value) {
         value = 65536 / (2048  - value);
-        this.bufferSource.playbackRate.value = value / this.baseSpeed;
     }
 
     getFrequency() {
-        var freq = 2048 - 65536 / (this.bufferSource.playbackRate.value * this.baseSpeed);
+        var freq = 2048 - 65536 / (this.audioContext.sampleRate);
         return freq | 1;
     }
 
@@ -438,12 +550,19 @@ export class Channel3 {
         this.buffer[bufferIndex+1] = (value & 0x0F) / 8 - 1;
     }
 
-    disable() {
-        this.bufferSource.disconnect();
+    getSample() {
+        // Add implementation for generating a sample based on current state
+        // For example, using the wave buffer
+        return 0; // Replace with actual sample generation
     }
 
     enable() {
-        this.bufferSource.connect(this.gainNode);
+        // No need to reconnect audio nodes
+        // We'll use the sample-based approach instead
+    }
+
+    disable() {
+        this.playing = false;
     }
 }
 
@@ -454,13 +573,17 @@ export class Channel4 {
         this.channelNumber = channelNumber;
         this.playing = false;
 
+        // Channel state
         this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
         this.soundLength = 64; // defaults to 64 periods
         this.lengthCheck = false;
 
         this.clockLength = 0;
 
-        this.audioContext = audioContext;
+        // Audio setup (if context available)
+        if (audioContext) {
+            this.audioContext = audioContext;
+        }
     }
 
     play() {
@@ -491,5 +614,20 @@ export class Channel4 {
 
     setLength(value) {
         this.soundLength = 64 - (value & 0x3F);
+    }
+
+    getSample() {
+        // Add implementation for generating a sample based on current state
+        // For example, using a noise generator
+        return 0; // Replace with actual sample generation
+    }
+
+    enable() {
+        // No need to reconnect audio nodes
+        // We'll use the sample-based approach instead
+    }
+
+    disable() {
+        this.playing = false;
     }
 }

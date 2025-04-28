@@ -45,6 +45,10 @@ export class Gameboy {
         this.statusContainer   = document.getElementById(this.options.statusContainerId) || document.createElement('div');
         this.gameNameContainer = document.getElementById(this.options.gameNameContainerId) || document.createElement('div');
         this.errorContainer    = document.getElementById(this.options.errorContainerId) || document.createElement('div');
+
+        // Initialize audio with improved timing
+        this.audioResumed = false;
+        this.initAudio();
     }
 
     // Create the ROM object and bind one or more readers
@@ -61,6 +65,20 @@ export class Gameboy {
                 }
             }
         }
+    }
+
+    // New audio initialization method
+    initAudio() {
+        document.addEventListener('click', () => {
+            if (!this.audioResumed && this.cpu && this.cpu.apu) {
+                this.audioResumed = true;
+                if (this.cpu.apu.audioContext && this.cpu.apu.audioContext.state === 'suspended') {
+                    this.cpu.apu.audioContext.resume().then(() => {
+                        console.log("Audio context resumed successfully");
+                    });
+                }
+            }
+        }, { once: true });
     }
 
     startRom(rom) {
@@ -110,6 +128,10 @@ export class Gameboy {
     setSoundEnabled(value) {
         if (value) {
             this.cpu.apu.connect();
+            // Attempt to resume audio context if it's suspended
+            if (this.cpu.apu.audioContext && this.cpu.apu.audioContext.state === 'suspended') {
+                this.cpu.apu.audioContext.resume();
+            }
         } else {
             this.cpu.apu.disconnect();
         }

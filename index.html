@@ -184,6 +184,22 @@
 <div id="audio-permission" class="hide">
     <p>This emulator requires audio permission for the best experience.</p>
     <button id="enable-audio">Enable Audio</button>
+    <script>
+        // Update the audio permission handling
+        document.getElementById('enable-audio').addEventListener('click', function() {
+            // This improved handling will help with audio performance
+            if (window.g && window.g.cpu && window.g.cpu.apu && window.g.cpu.apu.audioContext) {
+                window.g.cpu.apu.audioContext.resume().then(() => {
+                    document.getElementById('audio-permission').classList.add('hide');
+                    console.log("Audio context resumed successfully");
+                    // Re-enable sound
+                    if (document.getElementById('sound-enable').checked) {
+                        window.g.setSoundEnabled(true);
+                    }
+                });
+            }
+        });
+    </script>
 </div>
 
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
