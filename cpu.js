@@ -8,7 +8,7 @@ import { ConsoleSerial } from './utils.js';
 import { loadboot } from './bootrom.js';
 import { cpuOps } from './cpu-operations.js';
 
-// CPU class with improved error handling and timing
+// CPU class
 export class CPU {
     constructor(gameboy) {
         this.gameboy = gameboy;
@@ -19,14 +19,6 @@ export class CPU {
         this.isHalted = false;
         this.isPaused = false;
         this.usingBootRom = false;
-
-        // Performance tracking
-        this.lastFrameTime = 0;
-        this.cyclesPerFrame = 70224; // Cycles per frame (4194304 Hz / ~60 FPS)
-        this.frameTimeHistory = [];
-        this.fpsHistory = [];
-        this.lastFpsUpdate = 0;
-        this.currentFps = 60;
 
         this.createDevices();
     }
@@ -56,12 +48,6 @@ export class CPU {
     reset() {
         this.memory.reset();
         this.r.sp = 0xFFFE;
-        
-        // Reset performance tracking
-        this.lastFrameTime = 0;
-        this.frameTimeHistory = [];
-        this.fpsHistory = [];
-        this.lastFpsUpdate = 0;
     }
 
     loadRom(data) {
@@ -102,43 +88,18 @@ export class CPU {
         } else {
             this.r.pc = 0x0100;
         }
-        this.lastFrameTime = performance.now();
-        requestAnimationFrame(this.frame.bind(this));
+        this.frame();
     }
 
     stop() {
-        this.isPaused = true;
+        clearTimeout(this.nextFrameTimer);
     }
 
-    // Improved fetch-and-execute loop with better timing
-    frame(timestamp) {
-        if (this.isPaused) return;
-        
-        // Schedule next frame immediately to maintain frame rate
-        requestAnimationFrame(this.frame.bind(this));
-        
-        // Calculate time elapsed and expected cycles to execute
-        const now = timestamp || performance.now();
-        const elapsed = now - this.lastFrameTime;
-        this.lastFrameTime = now;
-        
-        // Track FPS
-        this.frameTimeHistory.push(elapsed);
-        if (this.frameTimeHistory.length > 60) {
-            this.frameTimeHistory.shift();
-        }
-        
-        if (now - this.lastFpsUpdate > 1000) {
-            const totalTime = this.frameTimeHistory.reduce((a, b) => a + b, 0);
-            this.currentFps = this.frameTimeHistory.length / (totalTime / 1000);
-            this.fpsHistory.push(this.currentFps);
-            if (this.fpsHistory.length > 10) this.fpsHistory.shift();
-            this.lastFpsUpdate = now;
-            
-            // Log performance for debugging
-            if (window.DEBUG_PERFORMANCE) {
-                console.log(`FPS: ${this.currentFps.toFixed(1)}, Avg Frame time: ${(totalTime / this.frameTimeHistory.length).toFixed(2)}ms`);
-            }
+    // Fetch-and-execute loop
+    // Will execute instructions for the duration of a frame
+    frame() {
+        if (!this.isPaused) {
+            this.nextFrameTimer = setTimeout(this.frame.bind(this), 1000 / 60); 
         }
 
         try {
@@ -147,17 +108,8 @@ export class CPU {
                 var oldInstrCount = this.clock.c;
                 if (!this.isHalted) {
                     var opcode = this.fetchOpcode();
-                    
-                    // Check if opcode exists before execution
-                    if (opcode !== null && opcodeMap[opcode]) {
-                        opcodeMap[opcode](this);
-                        this.r.F &= 0xF0; // tmp fix
-                    } else {
-                        // Log problematic opcode for debugging
-                        console.error(`Invalid opcode ${opcode?.toString(16)} at address ${(this.r.pc-1).toString(16)}`);
-                        this.stop();
-                        break;
-                    }
+                    opcodeMap[opcode](this);
+                    this.r.F &= 0xF0; // tmp fix
 
                     if (this.enableSerial) {
                         var instr = this.clock.c - oldInstrCount;
@@ -170,16 +122,15 @@ export class CPU {
                     this.clock.c += 4;
                 }
 
-                var elapsedCycles = this.clock.c - oldInstrCount;
-                vblank = this.gpu.update(elapsedCycles);
-                this.timer.update(elapsedCycles);
+                var elapsed = this.clock.c - oldInstrCount;
+                vblank = this.gpu.update(elapsed);
+                this.timer.update(elapsed);
                 this.input.update();
-                this.apu.update(elapsedCycles);
+                this.apu.update(elapsed);
                 this.checkInterrupt();
             }
             this.clock.c = 0;
         } catch (e) {
-            console.error("Error during CPU execution:", e);
             this.gameboy.handleException(e);
         }
     }
@@ -225,8 +176,7 @@ export class CPU {
     unpause() {
         if (this.isPaused) {
             this.isPaused = false;
-            this.lastFrameTime = performance.now();
-            requestAnimationFrame(this.frame.bind(this));
+            this.frame();
         }
     }
 

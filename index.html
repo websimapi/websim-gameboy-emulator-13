@@ -23,7 +23,6 @@
         canvas {
             background-color: #c0c0c0;
             display: block;
-            image-rendering: pixelated;  
         }
         .hide {
             display: none;
@@ -135,34 +134,6 @@
         input:checked + .slider:before {
             transform: translateX(26px);
         }
-        
-        /* Performance monitor styles */
-        #performance-monitor {
-            background-color: #333;
-            border-radius: 5px;
-            padding: 10px;
-            margin: 15px 0;
-            display: none;
-        }
-        #performance-monitor.visible {
-            display: block;
-        }
-        #fps-display {
-            font-weight: bold;
-            color: #4CAF50;
-        }
-        .perf-bar-container {
-            height: 10px;
-            background-color: #555;
-            border-radius: 5px;
-            margin: 5px 0;
-            overflow: hidden;
-        }
-        .perf-bar {
-            height: 100%;
-            background-color: #4CAF50;
-            width: 100%;
-        }
     </style>
     
     <!-- New implementation import map -->
@@ -217,20 +188,12 @@
 
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
 
-<div id="performance-monitor">
-    <p>Performance: <span id="fps-display">60 FPS</span></p>
-    <div class="perf-bar-container">
-        <div id="fps-bar" class="perf-bar"></div>
-    </div>
-</div>
-
 <p class="commands">
     <button onclick="g.pause(true);">Pause</button>
     <button onclick="g.pause(false);">Run</button>
-    <button onclick="togglePerformanceMonitor()">Toggle Performance Monitor</button>
 </p>
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
 </p>
 <p class="commands">
     <label>
@@ -284,42 +247,6 @@
 
 <!-- Implementation Toggle Script -->
 <script>
-// Performance debugging flag
-window.DEBUG_PERFORMANCE = false;
-
-// Performance monitor functions
-function togglePerformanceMonitor() {
-    const monitor = document.getElementById('performance-monitor');
-    monitor.classList.toggle('visible');
-    window.DEBUG_PERFORMANCE = monitor.classList.contains('visible');
-}
-
-// Function to update performance display
-function updatePerformanceDisplay(fps) {
-    if (!document.getElementById('performance-monitor').classList.contains('visible')) return;
-    
-    document.getElementById('fps-display').textContent = fps.toFixed(1) + ' FPS';
-    const fpsBar = document.getElementById('fps-bar');
-    // Show green when FPS is good (close to 60), yellow when it's mediocre, red when it's bad
-    const fpsRatio = Math.min(fps / 60, 1);
-    fpsBar.style.width = (fpsRatio * 100) + '%';
-    
-    if (fpsRatio > 0.9) {
-        fpsBar.style.backgroundColor = '#4CAF50'; // Green
-    } else if (fpsRatio > 0.7) {
-        fpsBar.style.backgroundColor = '#FFC107'; // Yellow
-    } else {
-        fpsBar.style.backgroundColor = '#F44336'; // Red
-    }
-}
-
-// Set up performance monitoring
-setInterval(() => {
-    if (window.g && g.cpu && g.cpu.currentFps) {
-        updatePerformanceDisplay(g.cpu.currentFps);
-    }
-}, 500);
-
 // Check localStorage or default to refactored implementation
 const useOriginal = localStorage.getItem('useOriginalImplementation') === 'true';
 const toggleSwitch = document.getElementById('implementation-toggle');
@@ -407,10 +334,6 @@ if (useOriginal) {
             g.setScreenZoom(document.getElementById('screen-zoom').value);
         }
 
-        // Apply some browser optimizations for better performance
-        // Add a hint to the browser to optimize for performance
-        document.documentElement.style.contain = 'content';
-        
         // When document is loaded, initialize the Audio
         document.addEventListener('DOMContentLoaded', function() {
             initAudio();

@@ -9,48 +9,147 @@ export class APU {
     constructor(memory) {
         this.memory = memory;
         this.enabled = false;
-
+        this.initAudioContext();
+        
+        // Channel setup with improved buffer management
+        this.setupChannels();
+        
+        // Timing constants from GameBoy hardware specs
+        this.cyclesPerSecond = 4194304; // GB CPU speed in Hz
+        this.frameSequencerRate = this.cyclesPerSecond / 512; // Frame sequencer steps at 512Hz
+        this.frameSequencerCounter = 0;
+        this.frameSequenceStep = 0;
+        
+        // Master volume control (0-1)
+        this.masterVolume = 0.15;
+        
+        // Channel panning (NR50, NR51 registers)
+        this.leftVolume = 7;
+        this.rightVolume = 7;
+        this.channelControl = 0xFF; // Which channels output to which terminal
+    }
+    
+    initAudioContext() {
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
-        this.audioContext = new AudioContext();
         
-        // Add a master gain node for volume control
-        this.masterGain = this.audioContext.createGain();
-        this.masterGain.gain.value = 0.5; // Adjust overall volume
-        this.masterGain.connect(this.audioContext.destination);
+        try {
+            this.audioContext = new AudioContext({
+                latencyHint: 'interactive',
+                sampleRate: 44100 // Standard sample rate that works well for GameBoy sounds
+            });
+            
+            // Create a main gain node for master volume control
+            this.masterGainNode = this.audioContext.createGain();
+            this.masterGainNode.gain.value = this.masterVolume;
+            this.masterGainNode.connect(this.audioContext.destination);
+            
+            // Create stereo panning
+            this.stereoPanner = this.audioContext.createStereoPanner();
+            this.stereoPanner.connect(this.masterGainNode);
+            
+            // Create analyzer for visualization (optional)
+            this.analyzer = this.audioContext.createAnalyser();
+            this.analyzer.fftSize = 256;
+            this.analyzer.connect(this.stereoPanner);
+            
+            console.log("Audio context initialized successfully");
+        } catch (e) {
+            console.error("Failed to initialize Web Audio API:", e);
+            this.audioContext = null;
+        }
+    }
+    
+    setupChannels() {
+        if (!this.audioContext) return;
         
-        // Add a compressor to improve audio quality
-        this.compressor = this.audioContext.createDynamicsCompressor();
-        this.compressor.threshold.value = -24;
-        this.compressor.knee.value = 30;
-        this.compressor.ratio.value = 12;
-        this.compressor.attack.value = 0.003;
-        this.compressor.release.value = 0.25;
-        this.compressor.connect(this.masterGain);
-
-        // Create audio channels
-        this.channel1 = new Channel1(this, 1, this.audioContext, this.compressor);
-        this.channel2 = new Channel1(this, 2, this.audioContext, this.compressor);
-        this.channel3 = new Channel3(this, 3, this.audioContext, this.compressor);
-        this.channel4 = new Channel4(this, 4, this.audioContext, this.compressor);
+        // Create mixer nodes for left and right channels
+        this.leftMixer = this.audioContext.createGain();
+        this.rightMixer = this.audioContext.createGain();
         
-        // Batch audio processing for better performance
-        this.accumulatedTime = 0;
-        this.updateInterval = 4000; // Process audio every 4000 cycles
+        // Connect mixers to the analyser
+        this.leftMixer.connect(this.analyzer);
+        this.rightMixer.connect(this.analyzer);
+        
+        // Initialize audio channels with improved configuration
+        this.channel1 = new Channel1(this, 1, this.audioContext);
+        this.channel2 = new Channel2(this, 2, this.audioContext);
+        this.channel3 = new Channel3(this, 3, this.audioContext);
+        this.channel4 = new Channel4(this, 4, this.audioContext);
+        
+        // Connect channels to appropriate mixers based on initial panning
+        this.updateChannelPanning();
+    }
+    
+    updateChannelPanning() {
+        const panValues = this.memory.rb(0xFF25); // NR51 register
+        
+        // Connect each channel to the appropriate mixer (left, right, or both)
+        // Channel 1
+        if (panValues & 0x10) this.channel1.connectOutput(this.leftMixer);
+        else this.channel1.disconnectOutput(this.leftMixer);
+        
+        if (panValues & 0x01) this.channel1.connectOutput(this.rightMixer);
+        else this.channel1.disconnectOutput(this.rightMixer);
+        
+        // Channel 2
+        if (panValues & 0x20) this.channel2.connectOutput(this.leftMixer);
+        else this.channel2.disconnectOutput(this.leftMixer);
+        
+        if (panValues & 0x02) this.channel2.connectOutput(this.rightMixer);
+        else this.channel2.disconnectOutput(this.rightMixer);
+        
+        // Channel 3
+        if (panValues & 0x40) this.channel3.connectOutput(this.leftMixer);
+        else this.channel3.disconnectOutput(this.leftMixer);
+        
+        if (panValues & 0x04) this.channel3.connectOutput(this.rightMixer);
+        else this.channel3.disconnectOutput(this.rightMixer);
+        
+        // Channel 4
+        if (panValues & 0x80) this.channel4.connectOutput(this.leftMixer);
+        else this.channel4.disconnectOutput(this.leftMixer);
+        
+        if (panValues & 0x08) this.channel4.connectOutput(this.rightMixer);
+        else this.channel4.disconnectOutput(this.rightMixer);
+        
+        // Update master volumes
+        const volReg = this.memory.rb(0xFF24); // NR50 register
+        this.leftVolume = (volReg >> 4) & 0x07;
+        this.rightVolume = volReg & 0x07;
+        
+        this.leftMixer.gain.value = this.leftVolume / 7;
+        this.rightMixer.gain.value = this.rightVolume / 7;
     }
 
     connect() {
-        this.channel1.enable();
-        this.channel2.enable();
-        this.channel3.enable();
-        this.channel4.enable();
+        if (!this.audioContext) return;
         
         // Resume audio context if suspended
         if (this.audioContext.state === 'suspended') {
-            this.audioContext.resume();
+            this.audioContext.resume().then(() => {
+                console.log("Audio context resumed successfully");
+                this.enabled = true;
+                this.enableChannels();
+            });
+        } else {
+            this.enabled = true;
+            this.enableChannels();
         }
     }
 
     disconnect() {
+        this.enabled = false;
+        this.disableChannels();
+    }
+    
+    enableChannels() {
+        this.channel1.enable();
+        this.channel2.enable();
+        this.channel3.enable();
+        this.channel4.enable();
+    }
+    
+    disableChannels() {
         this.channel1.disable();
         this.channel2.disable();
         this.channel3.disable();
@@ -60,25 +159,70 @@ export class APU {
     // Updates the states of each channel given the elapsed time
     // (in instructions) since last update
     update(clockElapsed) {
-        if (this.enabled == false) return;
+        if (!this.enabled || !this.audioContext) return;
 
-        // Accumulate time and only update audio at specified intervals
-        this.accumulatedTime += clockElapsed;
-        if (this.accumulatedTime >= this.updateInterval) {
-            const timeToProcess = this.accumulatedTime;
-            this.accumulatedTime = 0;
-            
-            // Process all channels
-            this.channel1.update(timeToProcess);
-            this.channel2.update(timeToProcess);
-            this.channel3.update(timeToProcess);
-            this.channel4.update(timeToProcess);
+        // Update frame sequencer
+        this.frameSequencerCounter += clockElapsed;
+        if (this.frameSequencerCounter >= this.cyclesPerSecond / 512) {
+            this.frameSequencerCounter -= this.cyclesPerSecond / 512;
+            this.updateFrameSequencer();
         }
+
+        // Update channels with cycle accurate timing
+        this.channel1.update(clockElapsed);
+        this.channel2.update(clockElapsed);
+        this.channel3.update(clockElapsed);
+        this.channel4.update(clockElapsed);
+    }
+    
+    updateFrameSequencer() {
+        // The frame sequencer clocks different components at different rates
+        switch (this.frameSequenceStep) {
+            case 0:
+                // Length counter
+                this.channel1.updateLength();
+                this.channel2.updateLength();
+                this.channel3.updateLength();
+                this.channel4.updateLength();
+                break;
+            case 2:
+                // Length counter and sweep
+                this.channel1.updateLength();
+                this.channel2.updateLength();
+                this.channel3.updateLength();
+                this.channel4.updateLength();
+                this.channel1.updateSweep();
+                break;
+            case 4:
+                // Length counter
+                this.channel1.updateLength();
+                this.channel2.updateLength();
+                this.channel3.updateLength();
+                this.channel4.updateLength();
+                break;
+            case 6:
+                // Length counter and sweep
+                this.channel1.updateLength();
+                this.channel2.updateLength();
+                this.channel3.updateLength();
+                this.channel4.updateLength();
+                this.channel1.updateSweep();
+                break;
+            case 7:
+                // Volume envelope
+                this.channel1.updateEnvelope();
+                this.channel2.updateEnvelope();
+                this.channel4.updateEnvelope();
+                break;
+        }
+        
+        // Increment frame sequence step (0-7)
+        this.frameSequenceStep = (this.frameSequenceStep + 1) % 8;
     }
 
     setSoundFlag(channel, value) {
         var mask = 0xFF - (1 << (channel - 1));
-        value = value << (channel - 1)
+        value = value << (channel - 1);
         var byteValue = this.memory.rb(APU.registers.NR52);
         byteValue &= mask;
         byteValue |= value;
@@ -94,109 +238,89 @@ export class APU {
         this.memory[addr] = value;
 
         switch (addr) {
+            // Master control
+            case 0xFF24: // NR50 - Master volume and VIN panning
+                this.updateChannelPanning();
+                break;
+                
+            case 0xFF25: // NR51 - Sound panning
+                this.updateChannelPanning();
+                break;
+                
             // Channel 1 addresses
-            case 0xFF10:
-                this.channel1.clockSweep = 0;
-                this.channel1.sweepTime = ((value & 0x70) >> 4);
-                this.channel1.sweepSign = (value & 0x08) ? -1 : 1;
-                this.channel1.sweepShifts = (value & 0x07);
-                this.channel1.sweepCount = this.channel1.sweepShifts;
+            case 0xFF10: // NR10 - Channel 1 Sweep
+                this.channel1.updateSweepParams(value);
                 break;
-            case 0xFF11:
-                // todo : bits 6-7
-                this.channel1.setLength(value & 0x3F);
+                
+            case 0xFF11: // NR11 - Channel 1 Length Timer & Duty Cycle
+                this.channel1.setLengthAndDuty(value);
                 break;
-            case 0xFF12:
-                this.channel1.envelopeSign = (value & 0x08) ? 1 : -1;
-                var envelopeVolume = (value & 0xF0) >> 4;
-                this.channel1.setEnvelopeVolume(envelopeVolume);
-                this.channel1.envelopeStep = (value & 0x07);
+                
+            case 0xFF12: // NR12 - Channel 1 Volume Envelope
+                this.channel1.setEnvelope(value);
                 break;
-            case 0xFF13:
-                var frequency = this.channel1.getFrequency();
-                frequency &= 0xF00;
-                frequency |= value;
-                this.channel1.setFrequency(frequency);
+                
+            case 0xFF13: // NR13 - Channel 1 Frequency (low)
+                this.channel1.setFrequencyLow(value);
                 break;
-            case 0xFF14:
-                var frequency = this.channel1.getFrequency();
-                frequency &= 0xFF;
-                frequency |= (value & 7) << 8;
-                this.channel1.setFrequency(frequency);
-                this.channel1.lengthCheck = (value & 0x40) ? true : false;
-                if (value & 0x80) this.channel1.play();
+                
+            case 0xFF14: // NR14 - Channel 1 Frequency (high) & Control
+                this.channel1.setFrequencyHigh(value);
                 break;
 
             // Channel 2 addresses
-            case 0xFF16:
-                // todo : bits 6-7
-                this.channel2.setLength(value & 0x3F);
+            case 0xFF16: // NR21 - Channel 2 Length Timer & Duty Cycle
+                this.channel2.setLengthAndDuty(value);
                 break;
-            case 0xFF17:
-                this.channel2.envelopeSign = (value & 0x08) ? 1 : -1;
-                var envelopeVolume = (value & 0xF0) >> 4;
-                this.channel2.setEnvelopeVolume(envelopeVolume);
-                this.channel2.envelopeStep = (value & 0x07);
+                
+            case 0xFF17: // NR22 - Channel 2 Volume Envelope
+                this.channel2.setEnvelope(value);
                 break;
-            case 0xFF18:
-                var frequency = this.channel2.getFrequency();
-                frequency &= 0xF00;
-                frequency |= value;
-                this.channel2.setFrequency(frequency);
+                
+            case 0xFF18: // NR23 - Channel 2 Frequency (low)
+                this.channel2.setFrequencyLow(value);
                 break;
-            case 0xFF19:
-                var frequency = this.channel2.getFrequency();
-                frequency &= 0xFF;
-                frequency |= (value & 7) << 8;
-                this.channel2.setFrequency(frequency);
-                this.channel2.lengthCheck = (value & 0x40) ? true : false;
-                if (value & 0x80) {
-                    this.channel2.play();
-                }
+                
+            case 0xFF19: // NR24 - Channel 2 Frequency (high) & Control
+                this.channel2.setFrequencyHigh(value);
                 break;
 
             // Channel 3 addresses
-            case 0xFF1A:
-                // todo
+            case 0xFF1A: // NR30 - Channel 3 Sound on/off
+                this.channel3.setEnabled(value);
                 break;
-            case 0xFF1B:
+                
+            case 0xFF1B: // NR31 - Channel 3 Sound Length
                 this.channel3.setLength(value);
                 break;
-            case 0xFF1C:
-                // todo
+                
+            case 0xFF1C: // NR32 - Channel 3 Select output level
+                this.channel3.setOutputLevel(value);
                 break;
-            case 0xFF1D:
-                var frequency = this.channel3.getFrequency();
-                frequency &= 0xF00;
-                frequency |= value;
-                this.channel3.setFrequency(frequency);
+                
+            case 0xFF1D: // NR33 - Channel 3 Frequency (low)
+                this.channel3.setFrequencyLow(value);
                 break;
-            case 0xFF1E:
-                var frequency = this.channel3.getFrequency();
-                frequency &= 0xFF;
-                frequency |= (value & 7) << 8;
-                this.channel3.setFrequency(frequency);
-                this.channel3.lengthCheck = (value & 0x40) ? true : false;
-                if (value & 0x80) {
-                    this.channel3.play();
-                }
+                
+            case 0xFF1E: // NR34 - Channel 3 Frequency (high) & Control
+                this.channel3.setFrequencyHigh(value);
                 break;
 
             // Channel 4 addresses
-            case 0xFF20:
-                this.channel4.setLength(value & 0x3F);
+            case 0xFF20: // NR41 - Channel 4 Sound Length
+                this.channel4.setLength(value);
                 break;
-            case 0xFF21:
-                // todo
+                
+            case 0xFF21: // NR42 - Channel 4 Volume Envelope
+                this.channel4.setEnvelope(value);
                 break;
-            case 0xFF22:
-                // todo
+                
+            case 0xFF22: // NR43 - Channel 4 Polynomial Counter
+                this.channel4.setNoise(value);
                 break;
-            case 0xFF23:
-                this.channel4.lengthCheck = (value & 0x40) ? true : false;
-                if (value & 0x80) {
-                    this.channel4.play();
-                }
+                
+            case 0xFF23: // NR44 - Channel 4 Counter/consecutive & Control
+                this.channel4.setControl(value);
                 break;
 
             // channel 3 wave bytes
@@ -207,14 +331,23 @@ export class APU {
                 break;
 
             // general audio switch
-            case 0xFF26:
+            case 0xFF26: // NR52 - Sound on/off
                 value &= 0xF0;
                 this.memory[addr] = value;
-                this.enabled = (value & 0x80) == 0 ? false : true;
-                if (!this.enabled) {
-                    for (var i = 0xFF10; i < 0xFF27; i++)
-                        this.memory[i] = 0;
-                    // todo stop sound
+                const newEnabled = (value & 0x80) !== 0;
+                
+                if (this.enabled !== newEnabled) {
+                    this.enabled = newEnabled;
+                    
+                    if (!this.enabled) {
+                        // Reset all sound registers when powered off
+                        for (var i = 0xFF10; i < 0xFF26; i++) {
+                            this.memory[i] = 0;
+                        }
+                        this.disableChannels();
+                    } else {
+                        this.enableChannels();
+                    }
                 }
                 break;
         }
@@ -249,496 +382,800 @@ export class APU {
             NR52: 0xFF26
         };
     }
+    
+    // Utility function for debugging
+    getAudioState() {
+        return {
+            enabled: this.enabled,
+            contextState: this.audioContext ? this.audioContext.state : 'none',
+            channels: [
+                this.channel1.getDebugState(),
+                this.channel2.getDebugState(),
+                this.channel3.getDebugState(),
+                this.channel4.getDebugState()
+            ]
+        };
+    }
 }
 
-// Channel 1 implementation (square wave with sweep)
-export class Channel1 {
-    constructor(apu, channelNumber, audioContext, destination) {
+// Base Channel class with common functionality
+class Channel {
+    constructor(apu, channelNumber, audioContext) {
         this.apu = apu;
         this.channelNumber = channelNumber;
-        this.playing = false;
-
-        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
-        this.soundLength = 64; // defaults to 64 periods
-        this.lengthCheck = false;
-
-        this.sweepTime = 0; // from 0 to 7
-        this.sweepStepLength = 0x8000; // 1 / 128 seconds of instructions
-        this.sweepCount = 0;
-        this.sweepShifts = 0;
-        this.sweepSign = 1; // +1 / -1 for increase / decrease freq
-
-        this.frequency = 0;
-
-        this.envelopeStep = 0;
-        this.envelopeStepLength = 0x10000;// 1 / 64 seconds of instructions
-        this.envelopeCheck = false;
-        this.envelopeSign = 1;
-
-        this.clockLength = 0;
-        this.clockEnvelop = 0;
-        this.clockSweep = 0;
-
-        // Improved audio node setup
-        var gainNode = audioContext.createGain();
-        gainNode.gain.value = 0;
-        
-        // Add a low-pass filter to reduce high-frequency noise
-        var filter = audioContext.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.value = 2000;
-        filter.Q.value = 0.7;
-        
-        var oscillator = audioContext.createOscillator();
-        oscillator.type = 'square';
-        oscillator.frequency.value = 1000;
-        
-        // Connect the nodes with the filter
-        oscillator.connect(filter);
-        filter.connect(gainNode);
-        
-        // Start the oscillator immediately but keep gain at 0
-        oscillator.start(0);
-
         this.audioContext = audioContext;
-        this.gainNode = gainNode;
-        this.oscillator = oscillator;
-        this.filter = filter;
-        this.destination = destination;
+        this.playing = false;
+        this.enabled = false;
+        this.lengthCounter = 0;
+        this.lengthEnabled = false;
+        this.outputs = new Set();
         
-        // Use AudioParam automation for smoother volume changes
+        // Create gain node for this channel
+        this.gainNode = this.audioContext.createGain();
+        this.gainNode.gain.value = 0;
+    }
+    
+    enable() {
+        this.enabled = true;
+    }
+    
+    disable() {
+        this.enabled = false;
+        this.playing = false;
+        this.gainNode.gain.value = 0;
+    }
+    
+    connectOutput(destination) {
+        if (!this.outputs.has(destination)) {
+            this.gainNode.connect(destination);
+            this.outputs.add(destination);
+        }
+    }
+    
+    disconnectOutput(destination) {
+        if (this.outputs.has(destination)) {
+            this.gainNode.disconnect(destination);
+            this.outputs.delete(destination);
+        }
+    }
+    
+    updateLength() {
+        if (this.lengthEnabled && this.lengthCounter > 0) {
+            this.lengthCounter--;
+            if (this.lengthCounter === 0) {
+                this.stop();
+            }
+        }
+    }
+    
+    stop() {
+        this.playing = false;
+        this.apu.setSoundFlag(this.channelNumber, 0);
         this.gainNode.gain.setValueAtTime(0, this.audioContext.currentTime);
     }
+    
+    getDebugState() {
+        return {
+            channelNumber: this.channelNumber,
+            playing: this.playing,
+            enabled: this.enabled,
+            lengthCounter: this.lengthCounter,
+            lengthEnabled: this.lengthEnabled,
+            frequency: this.frequency || 0,
+            volume: this.gainNode.gain.value
+        };
+    }
+}
 
-    play() {
-        if (this.playing) return;
+// Channel 1 implementation (Square wave with sweep)
+export class Channel1 extends Channel {
+    constructor(apu, channelNumber, audioContext) {
+        super(apu, channelNumber, audioContext);
+        
+        // Sweep parameters
+        this.sweepTime = 0;
+        this.sweepDirection = 0; // 0: increase, 1: decrease
+        this.sweepShifts = 0;
+        this.sweepEnabled = false;
+        this.shadowFrequency = 0;
+        
+        // Envelope parameters
+        this.envelopeVolume = 0;
+        this.envelopeDirection = 0; // 0: decrease, 1: increase
+        this.envelopeSweep = 0;
+        this.envelopeTimer = 0;
+        
+        // Duty cycle (wave pattern)
+        this.dutyCycle = 0;
+        
+        // Create oscillator
+        this.oscillator = audioContext.createOscillator();
+        this.oscillator.type = 'square';
+        this.oscillator.frequency.value = 440; // Default frequency
+        this.oscillator.connect(this.gainNode);
+        this.oscillator.start();
+        
+        // Frequency and timer tracking
+        this.frequency = 0;
+        this.frequencyTimer = 0;
+        this.dutyPosition = 0;
+        
+        // Create wave shaper for duty cycle control
+        this.setupDutyCycle();
+    }
+    
+    setupDutyCycle() {
+        // GameBoy has 4 duty patterns (0-3)
+        this.dutyPatterns = [
+            [0, 0, 0, 0, 0, 0, 0, 1], // 12.5%
+            [1, 0, 0, 0, 0, 0, 0, 1], // 25%
+            [1, 0, 0, 0, 0, 1, 1, 1], // 50%
+            [0, 1, 1, 1, 1, 1, 1, 0]  // 75% (inverse of 25%)
+        ];
+        
+        // Create wave shaper for custom duty cycle
+        this.waveShaper = this.audioContext.createWaveShaper();
+        this.setDutyCycle(2); // Default to 50% duty cycle
+        
+        // Connect waveshaper between oscillator and gain
+        this.oscillator.disconnect();
+        this.oscillator.connect(this.waveShaper);
+        this.waveShaper.connect(this.gainNode);
+    }
+    
+    setDutyCycle(dutyCycleIndex) {
+        this.dutyCycle = dutyCycleIndex & 3;
+        
+        // Create a curve that shapes the waveform to match the duty cycle
+        // This is a simplification - in real implementation we'd use 
+        // a more sophisticated approach for proper duty cycle simulation
+        const sampleRate = this.audioContext.sampleRate;
+        const curve = new Float32Array(sampleRate);
+        const pattern = this.dutyPatterns[this.dutyCycle];
+        
+        for (let i = 0; i < sampleRate; i++) {
+            const position = Math.floor((i / sampleRate) * 8) % 8;
+            curve[i] = pattern[position] ? 1 : -1;
+        }
+        
+        // Apply the curve to the wave shaper
+        this.waveShaper.curve = curve;
+    }
+    
+    updateSweepParams(value) {
+        this.sweepTime = (value & 0x70) >> 4;
+        this.sweepDirection = (value & 0x08) ? 1 : 0;
+        this.sweepShifts = value & 0x07;
+        this.sweepEnabled = this.sweepTime > 0 || this.sweepShifts > 0;
+        
+        if (this.sweepEnabled && this.playing) {
+            this.shadowFrequency = this.frequency;
+            this.calculateSweep();
+        }
+    }
+    
+    setLengthAndDuty(value) {
+        // Set duty cycle (bits 6-7)
+        this.setDutyCycle((value >> 6) & 3);
+        
+        // Set length counter (bits 0-5)
+        this.lengthCounter = 64 - (value & 0x3F);
+    }
+    
+    setEnvelope(value) {
+        // Initial volume (bits 4-7)
+        const initialVolume = (value >> 4) & 0x0F;
+        
+        // Envelope direction (bit 3)
+        this.envelopeDirection = (value & 0x08) ? 1 : 0;
+        
+        // Envelope sweep (bits 0-2)
+        this.envelopeSweep = value & 0x07;
+        
+        if (this.playing) {
+            this.setVolume(initialVolume / 15);
+        }
+        
+        // Reset envelope timer
+        this.envelopeTimer = this.envelopeSweep;
+        this.envelopeVolume = initialVolume;
+    }
+    
+    setFrequencyLow(value) {
+        // Set low 8 bits of frequency
+        this.frequency = (this.frequency & 0x700) | value;
+        this.updateOscillatorFrequency();
+    }
+    
+    setFrequencyHigh(value) {
+        // Set high 3 bits of frequency (bits 0-2)
+        this.frequency = (this.frequency & 0xFF) | ((value & 0x07) << 8);
+        
+        // Enable length counter if bit 6 is set
+        this.lengthEnabled = (value & 0x40) !== 0;
+        
+        // Trigger channel if bit 7 is set
+        if (value & 0x80) {
+            this.trigger();
+        }
+        
+        this.updateOscillatorFrequency();
+    }
+    
+    trigger() {
+        // If length counter is 0, set it to 64
+        if (this.lengthCounter === 0) {
+            this.lengthCounter = 64;
+        }
+        
+        // Reset frequency timer
+        this.frequencyTimer = 0;
+        
+        // Set envelope timer and initial volume
+        const envelopeRegister = this.apu.memory.rb(0xFF12);
+        this.envelopeVolume = (envelopeRegister >> 4) & 0x0F;
+        this.envelopeTimer = this.envelopeSweep;
+        
+        // Start channel
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
         
-        // Connect to the destination (compressor or master gain)
-        this.gainNode.connect(this.destination);
+        // Set volume based on envelope
+        this.setVolume(this.envelopeVolume / 15);
         
-        // Use ramping for smoother volume transition
-        const now = this.audioContext.currentTime;
-        this.gainNode.gain.cancelScheduledValues(now);
-        this.gainNode.gain.setValueAtTime(0, now);
-        this.gainNode.gain.linearRampToValueAtTime(this.envelopeVolume * 1/100, now + 0.01);
-        
-        this.clockLength = 0;
-        this.clockEnvelop = 0;
-        this.clockSweep = 0;
-        if (this.sweepShifts > 0) this.checkFreqSweep();
+        // Do an initial sweep calculation
+        if (this.sweepEnabled) {
+            this.calculateSweep();
+        }
     }
-
-    stop() {
-        if (!this.playing) return;
-        
-        // Fade out for smoother sound stopping
+    
+    setVolume(volume) {
+        // Apply volume with proper ramping to avoid clicks
         const now = this.audioContext.currentTime;
         this.gainNode.gain.cancelScheduledValues(now);
         this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
-        
-        // Schedule the actual disconnect after the fade
-        setTimeout(() => {
-            if (!this.playing) {
-                this.gainNode.disconnect();
-            }
-        }, 60);
-        
-        this.playing = false;
-        this.apu.setSoundFlag(this.channelNumber, 0);
+        this.gainNode.gain.linearRampToValueAtTime(volume, now + 0.01);
     }
-
-    checkFreqSweep() {
-        var oldFreq = this.getFrequency();
-        var newFreq = oldFreq + this.sweepSign * (oldFreq >> this.sweepShifts);
-        if (newFreq > 0x7FF) {
-            newFreq = 0;
-            this.stop();
-        }
-
-        return newFreq;
-    }
-
-    update(clockElapsed) {
+    
+    updateOscillatorFrequency() {
         if (!this.playing) return;
         
-        this.clockEnvelop += clockElapsed;
-        this.clockSweep   += clockElapsed;
-
-        if ((this.sweepCount || this.sweepTime) && this.clockSweep > (this.sweepStepLength * this.sweepTime)) {
-            this.clockSweep -= (this.sweepStepLength * this.sweepTime);
-            this.sweepCount--;
-
-            var newFreq = this.checkFreqSweep(); // process and check new freq
-
-            this.apu.memory[0xFF13] = newFreq & 0xFF;
-            this.apu.memory[0xFF14] &= 0xF8;
-            this.apu.memory[0xFF14] |= (newFreq & 0x700) >> 8;
-            this.setFrequency(newFreq);
-
-            this.checkFreqSweep(); // check again with new value
-        }
-
-        if (this.envelopeCheck && this.clockEnvelop > this.envelopeStepLength) {
-            this.clockEnvelop -= this.envelopeStepLength;
-            this.envelopeStep--;
-            this.setEnvelopeVolume(this.envelopeVolume + this.envelopeSign);
-            if (this.envelopeStep <= 0) {
-                this.envelopeCheck = false;
-            }
-        }
-
-        if (this.lengthCheck) {
-            this.clockLength  += clockElapsed;
-            if (this.clockLength > this.soundLengthUnit) {
-                this.soundLength--;
-                this.clockLength -= this.soundLengthUnit;
-                if (this.soundLength == 0) {
-                    this.setLength(0);
-                    this.stop();
-                }
-            }
-        }
-    }
-
-    setFrequency(value) {
-        this.frequency = value;
-        const gbFreq = 131072 / (2048 - this.frequency);
+        // Convert GB frequency value to actual frequency in Hz
+        // GB uses period, not frequency directly - formula: 131072/(2048-frequency)
+        const gbFrequency = 131072 / (2048 - this.frequency);
         
-        // Use exponential ramp for smoother frequency changes
+        // Update oscillator with slight ramp to avoid clicks
         const now = this.audioContext.currentTime;
         this.oscillator.frequency.cancelScheduledValues(now);
         this.oscillator.frequency.setValueAtTime(this.oscillator.frequency.value, now);
-        this.oscillator.frequency.exponentialRampToValueAtTime(Math.max(gbFreq, 0.1), now + 0.01);
+        this.oscillator.frequency.linearRampToValueAtTime(gbFrequency, now + 0.01);
     }
-
-    getFrequency() {
-        return this.frequency;
-    }
-
-    setLength(value) {
-        this.soundLength = 64 - (value & 0x3F);
-    }
-
-    setEnvelopeVolume(volume) {
-        this.envelopeCheck = volume > 0 && volume < 16 ? true : false;
-        this.envelopeVolume = volume;
+    
+    calculateSweep() {
+        // Skip if sweep is disabled or shift is 0
+        if (!this.sweepEnabled || this.sweepShifts === 0) return;
         
-        // Smooth volume transitions
-        if (this.playing) {
-            const now = this.audioContext.currentTime;
-            this.gainNode.gain.cancelScheduledValues(now);
-            this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-            this.gainNode.gain.linearRampToValueAtTime(this.envelopeVolume * 1/100, now + 0.05);
+        // Calculate new frequency: F' = F +/- (F >> shifts)
+        const offset = this.shadowFrequency >> this.sweepShifts;
+        
+        if (this.sweepDirection === 1) {
+            // Decrease frequency
+            this.shadowFrequency -= offset;
+        } else {
+            // Increase frequency
+            this.shadowFrequency += offset;
+        }
+        
+        // If new frequency is > 2047, channel is disabled
+        if (this.shadowFrequency > 2047) {
+            this.stop();
+            return;
+        }
+        
+        // Apply new frequency if sweep is active
+        if (this.sweepTime > 0 && this.sweepShifts > 0) {
+            this.frequency = this.shadowFrequency;
+            this.updateOscillatorFrequency();
+            
+            // Do another calculation to check if this would overflow
+            this.calculateSweep();
         }
     }
-
-    disable() {
-        this.stop();
-        this.oscillator.disconnect();
+    
+    updateSweep() {
+        if (!this.playing || !this.sweepEnabled || this.sweepTime === 0) return;
+        
+        // Update sweep timer
+        if (--this.sweepTime <= 0) {
+            // Reset sweep timer
+            this.sweepTime = (this.apu.memory.rb(0xFF10) & 0x70) >> 4;
+            
+            // If sweep timer is 0, no sweep adjustment
+            if (this.sweepTime === 0) return;
+            
+            // Calculate and apply new frequency
+            this.calculateSweep();
+        }
     }
-
-    enable() {
-        this.oscillator.connect(this.filter);
-    }
-}
-
-// Channel 3 implementation (wave form)
-export class Channel3 {
-    constructor(apu, channelNumber, audioContext, destination) {
-        this.apu = apu;
-        this.channelNumber = channelNumber;
-        this.playing = false;
-
-        this.soundLength = 0;
-        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
-        this.lengthCheck = false;
-
-        this.clockLength = 0;
-
-        this.buffer = new Float32Array(32);
-
-        // Improved audio node setup
-        var gainNode = audioContext.createGain();
-        gainNode.gain.value = 0.5;
+    
+    updateEnvelope() {
+        if (!this.playing || this.envelopeSweep === 0) return;
         
-        // Add filter for cleaner waveform
-        var filter = audioContext.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.value = 4000;
-        filter.Q.value = 1.0;
-
-        this.baseSpeed = 65536;
-        var waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
-
-        var bufferSource = audioContext.createBufferSource();
-        bufferSource.buffer = waveBuffer;
-        bufferSource.loop = true;
-        
-        // Connect with filter
-        bufferSource.connect(filter);
-        filter.connect(gainNode);
-        
-        bufferSource.start(0);
-
-        this.audioContext = audioContext;
-        this.waveBuffer = waveBuffer;
-        this.bufferSource = bufferSource;
-        this.gainNode = gainNode;
-        this.filter = filter;
-        this.destination = destination;
-    }
-
-    play() {
-        if (this.playing) return;
-        this.playing = true;
-        this.apu.setSoundFlag(this.channelNumber, 1);
-        
-        // Copy buffer with improved wave quality
-        this.waveBuffer.copyToChannel(this.buffer, 0, 0);
-
-        // Smooth gain connection
-        const now = this.audioContext.currentTime;
-        this.gainNode.gain.cancelScheduledValues(now);
-        this.gainNode.gain.setValueAtTime(0, now);
-        this.gainNode.gain.linearRampToValueAtTime(0.5, now + 0.01);
-        
-        this.gainNode.connect(this.destination);
-        this.clockLength = 0;
-    }
-
-    stop() {
-        if (!this.playing) return;
-        
-        // Fade out for smoother sound stopping
-        const now = this.audioContext.currentTime;
-        this.gainNode.gain.cancelScheduledValues(now);
-        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
-        
-        // Schedule the actual disconnect after the fade
-        setTimeout(() => {
-            if (!this.playing) {
-                this.gainNode.disconnect();
-            }
-        }, 60);
-        
-        this.playing = false;
-        this.apu.setSoundFlag(this.channelNumber, 0);
-    }
-
-    update(clockElapsed) {
-        if (!this.playing) return;
-        
-        if (this.lengthCheck){
-            this.clockLength  += clockElapsed;
-            if (this.clockLength > this.soundLengthUnit) {
-                this.soundLength--;
-                this.clockLength -= this.soundLengthUnit;
-                if (this.soundLength == 0) {
-                    this.setLength(0);
-                    this.stop();
+        // Update envelope timer
+        if (--this.envelopeTimer <= 0) {
+            // Reset envelope timer
+            this.envelopeTimer = this.envelopeSweep;
+            
+            // If envelope sweep is 0, no volume adjustment
+            if (this.envelopeSweep === 0) return;
+            
+            // Update volume based on direction
+            if (this.envelopeDirection === 1) {
+                // Increase volume
+                if (this.envelopeVolume < 15) {
+                    this.envelopeVolume++;
+                    this.setVolume(this.envelopeVolume / 15);
+                }
+            } else {
+                // Decrease volume
+                if (this.envelopeVolume > 0) {
+                    this.envelopeVolume--;
+                    this.setVolume(this.envelopeVolume / 15);
                 }
             }
         }
     }
-
-    setFrequency(value) {
-        value = 65536 / (2048  - value);
-        const now = this.audioContext.currentTime;
+    
+    update(clockElapsed) {
+        if (!this.playing || !this.enabled) return;
         
-        // Use exponential ramp for smoother playback rate changes
-        this.bufferSource.playbackRate.cancelScheduledValues(now);
-        this.bufferSource.playbackRate.setValueAtTime(this.bufferSource.playbackRate.value, now);
-        this.bufferSource.playbackRate.exponentialRampToValueAtTime(
-            Math.max(value / this.baseSpeed, 0.01), now + 0.01);
+        // Update frequency timer
+        this.frequencyTimer += clockElapsed;
+        
+        // Update actual output
+        const period = this.calculatePeriod();
+        if (this.frequencyTimer >= period) {
+            this.frequencyTimer -= period;
+            this.dutyPosition = (this.dutyPosition + 1) % 8;
+            // In a full implementation we'd update the actual waveform here
+        }
     }
-
-    getFrequency() {
-        var freq = 2048 - 65536 / (this.bufferSource.playbackRate.value * this.baseSpeed);
-        return freq | 1;
+    
+    calculatePeriod() {
+        // GB frequency to period in CPU cycles
+        return (2048 - this.frequency) * 4;
     }
+}
 
+// Channel 2 implementation (Square wave without sweep)
+export class Channel2 extends Channel1 {
+    constructor(apu, channelNumber, audioContext) {
+        super(apu, channelNumber, audioContext);
+        // Channel 2 is identical to Channel 1 except it has no sweep
+        this.sweepEnabled = false;
+    }
+    
+    // Override sweep methods to do nothing
+    updateSweepParams() {
+        // Channel 2 has no sweep
+    }
+    
+    updateSweep() {
+        // Channel 2 has no sweep
+    }
+    
+    calculateSweep() {
+        // Channel 2 has no sweep
+    }
+}
+
+// Channel 3 implementation (Wave form)
+export class Channel3 extends Channel {
+    constructor(apu, channelNumber, audioContext) {
+        super(apu, channelNumber, audioContext);
+        
+        // Wave table
+        this.waveBuffer = new Uint8Array(32);
+        this.wavePosition = 0;
+        
+        // Volume level
+        this.volumeCode = 0;
+        this.volumeShift = 0;
+        
+        // Frequency
+        this.frequency = 0;
+        this.frequencyTimer = 0;
+        
+        // Create oscillator
+        this.setupWaveform();
+    }
+    
+    setupWaveform() {
+        // For wave channel, we'll use an oscillator with a custom periodic wave
+        this.oscillator = this.audioContext.createOscillator();
+        
+        // Create initial waveform
+        this.updateWaveform();
+        
+        // Connect oscillator to gain node
+        this.oscillator.connect(this.gainNode);
+        this.oscillator.start();
+    }
+    
+    updateWaveform() {
+        try {
+            // Convert 4-bit wave RAM to normalized wave data
+            const waveData = new Float32Array(32);
+            for (let i = 0; i < 32; i++) {
+                // Wave RAM contains 2 samples per byte
+                const byteIndex = Math.floor(i / 2);
+                const nibble = i % 2 === 0 ? 
+                    (this.waveBuffer[byteIndex] >> 4) & 0x0F : 
+                    this.waveBuffer[byteIndex] & 0x0F;
+                
+                // Convert from 4-bit to normalized -1 to 1
+                waveData[i] = (nibble / 7.5) - 1.0;
+            }
+            
+            // Create a periodic wave from the data
+            const wave = this.audioContext.createPeriodicWave(waveData, waveData, {
+                disableNormalization: true
+            });
+            
+            // Apply the wave to the oscillator
+            this.oscillator.setPeriodicWave(wave);
+        } catch (e) {
+            console.error("Error updating waveform:", e);
+        }
+    }
+    
+    setEnabled(value) {
+        // Bit 7 controls DAC power
+        const dacEnabled = (value & 0x80) !== 0;
+        
+        if (!dacEnabled) {
+            this.stop();
+        }
+        
+        this.enabled = dacEnabled;
+    }
+    
     setLength(value) {
-        this.soundLength = 256 - value;
+        this.lengthCounter = 256 - value;
     }
-
+    
+    setOutputLevel(value) {
+        // Bits 5-6 control volume
+        this.volumeCode = (value >> 5) & 0x03;
+        
+        // Convert volume code to shift amount
+        switch (this.volumeCode) {
+            case 0: this.volumeShift = 4; break; // Mute (shift right by 4 = divide by 16)
+            case 1: this.volumeShift = 0; break; // 100% (no shift)
+            case 2: this.volumeShift = 1; break; // 50% (shift right by 1 = divide by 2)
+            case 3: this.volumeShift = 2; break; // 25% (shift right by 2 = divide by 4)
+        }
+        
+        // Update volume
+        if (this.playing) {
+            this.updateVolume();
+        }
+    }
+    
+    updateVolume() {
+        // Volume is determined by the shift value
+        const volume = this.volumeCode === 0 ? 0 : 1.0 / (1 << this.volumeShift);
+        this.setVolume(volume * 0.5); // Reduce by half to match other channels
+    }
+    
+    setVolume(volume) {
+        const now = this.audioContext.currentTime;
+        this.gainNode.gain.cancelScheduledValues(now);
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(volume, now + 0.01);
+    }
+    
+    setFrequencyLow(value) {
+        // Set low 8 bits of frequency
+        this.frequency = (this.frequency & 0x700) | value;
+        this.updateOscillatorFrequency();
+    }
+    
+    setFrequencyHigh(value) {
+        // Set high 3 bits of frequency (bits 0-2)
+        this.frequency = (this.frequency & 0xFF) | ((value & 0x07) << 8);
+        
+        // Enable length counter if bit 6 is set
+        this.lengthEnabled = (value & 0x40) !== 0;
+        
+        // Trigger channel if bit 7 is set
+        if (value & 0x80) {
+            this.trigger();
+        }
+        
+        this.updateOscillatorFrequency();
+    }
+    
+    trigger() {
+        if (!this.enabled) return;
+        
+        // If length counter is 0, set it to 256
+        if (this.lengthCounter === 0) {
+            this.lengthCounter = 256;
+        }
+        
+        // Reset wave position
+        this.wavePosition = 0;
+        
+        // Reset frequency timer
+        this.frequencyTimer = 0;
+        
+        // Start channel
+        this.playing = true;
+        this.apu.setSoundFlag(this.channelNumber, 1);
+        
+        // Set volume based on output level
+        this.updateVolume();
+    }
+    
     setWaveBufferByte(index, value) {
-        var bufferIndex = index * 2;
-
-        // Improved waveform quality with anti-aliasing
-        const highNibble = (value >> 4) / 8 - 1;
-        const lowNibble = (value & 0x0F) / 8 - 1;
+        this.waveBuffer[index] = value;
         
-        // Apply a slight smoothing between samples
-        if (bufferIndex > 0) {
-            const prevVal = this.buffer[bufferIndex - 1];
-            this.buffer[bufferIndex] = (highNibble * 0.9 + prevVal * 0.1);
-        } else {
-            this.buffer[bufferIndex] = highNibble;
-        }
-        
-        if (bufferIndex < 30) {
-            const nextVal = index < 15 ? lowNibble : this.buffer[bufferIndex + 2];
-            this.buffer[bufferIndex + 1] = (lowNibble * 0.9 + nextVal * 0.1);
-        } else {
-            this.buffer[bufferIndex + 1] = lowNibble;
-        }
-        
-        // Update the buffer if playing for real-time wave changes
-        if (this.playing) {
-            this.waveBuffer.copyToChannel(this.buffer, 0, 0);
+        // Update waveform if channel is enabled
+        if (this.enabled) {
+            this.updateWaveform();
         }
     }
-
-    disable() {
-        this.stop();
-        this.bufferSource.disconnect();
+    
+    updateOscillatorFrequency() {
+        if (!this.playing) return;
+        
+        // Convert GB frequency value to actual frequency in Hz
+        // Wave channel: 65536 / (2048 - frequency)
+        const gbFrequency = 65536 / (2048 - this.frequency);
+        
+        // Update oscillator with slight ramp to avoid clicks
+        const now = this.audioContext.currentTime;
+        this.oscillator.frequency.cancelScheduledValues(now);
+        this.oscillator.frequency.setValueAtTime(this.oscillator.frequency.value, now);
+        this.oscillator.frequency.linearRampToValueAtTime(gbFrequency, now + 0.01);
     }
-
-    enable() {
-        this.bufferSource.connect(this.filter);
+    
+    update(clockElapsed) {
+        if (!this.playing || !this.enabled) return;
+        
+        // Update frequency timer
+        this.frequencyTimer += clockElapsed;
+        
+        // Wave channel has 2x the frequency of the square channels
+        const period = (2048 - this.frequency) * 2;
+        
+        if (this.frequencyTimer >= period) {
+            this.frequencyTimer -= period;
+            this.wavePosition = (this.wavePosition + 1) % 32;
+            // In a full implementation we'd update the actual output
+        }
     }
 }
 
-// Channel 4 implementation (noise)
-export class Channel4 {
-    constructor(apu, channelNumber, audioContext, destination) {
-        this.apu = apu;
-        this.channelNumber = channelNumber;
-        this.playing = false;
-
-        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
-        this.soundLength = 64; // defaults to 64 periods
-        this.lengthCheck = false;
-
-        this.clockLength = 0;
+// Channel 4 implementation (Noise)
+export class Channel4 extends Channel {
+    constructor(apu, channelNumber, audioContext) {
+        super(apu, channelNumber, audioContext);
         
-        // Add actual noise implementation with Web Audio
-        var gainNode = audioContext.createGain();
-        gainNode.gain.value = 0;
+        // Envelope parameters
+        this.envelopeVolume = 0;
+        this.envelopeDirection = 0; // 0: decrease, 1: increase
+        this.envelopeSweep = 0;
+        this.envelopeTimer = 0;
         
-        // Use a buffer source for noise generation
-        var noiseBuffer = this.createNoiseBuffer(audioContext);
-        var noiseSource = audioContext.createBufferSource();
-        noiseSource.buffer = noiseBuffer;
-        noiseSource.loop = true;
+        // Noise parameters
+        this.shiftFrequency = 0;
+        this.counterStep = 0; // 0: 15-bit, 1: 7-bit
+        this.divisorCode = 0;
+        this.divisor = 0;
         
-        // Add a bandpass filter for more authentic noise sound
-        var filter = audioContext.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.value = 1000;
-        filter.Q.value = 1.0;
+        // LFSR (Linear Feedback Shift Register)
+        this.lfsr = 0x7FFF;
+        this.lfsrTimer = 0;
         
-        noiseSource.connect(filter);
-        filter.connect(gainNode);
-        noiseSource.start(0);
-
-        this.audioContext = audioContext;
-        this.gainNode = gainNode;
-        this.noiseSource = noiseSource;
-        this.filter = filter;
-        this.destination = destination;
+        // Create noise source
+        this.setupNoise();
     }
     
-    // Create a noise buffer
-    createNoiseBuffer(context) {
-        const bufferSize = context.sampleRate * 2; // 2 seconds of noise
-        const buffer = context.createBuffer(1, bufferSize, context.sampleRate);
-        const output = buffer.getChannelData(0);
+    setupNoise() {
+        // Create a buffer source for noise
+        this.noiseNode = this.audioContext.createBufferSource();
+        this.noiseBuffer = this.audioContext.createBuffer(1, this.audioContext.sampleRate, this.audioContext.sampleRate);
         
-        // Fill with white noise
-        for (let i = 0; i < bufferSize; i++) {
-            output[i] = Math.random() * 2 - 1;
+        // Generate initial noise
+        this.generateNoise();
+        
+        // Connect noise to gain node
+        this.noiseNode.buffer = this.noiseBuffer;
+        this.noiseNode.loop = true;
+        this.noiseNode.connect(this.gainNode);
+        this.noiseNode.start();
+    }
+    
+    generateNoise() {
+        // Generate white noise
+        const data = this.noiseBuffer.getChannelData(0);
+        
+        // Seed LFSR with initial value
+        let lfsr = 0x7FFF;
+        
+        // Generate noise based on LFSR
+        for (let i = 0; i < data.length; i++) {
+            // Get output bit
+            const output = lfsr & 1;
+            
+            // Calculate feedback bit
+            let bit;
+            if (this.counterStep === 0) {
+                // 15-bit: bits 0 and 1
+                bit = ((lfsr & 1) ^ ((lfsr >> 1) & 1));
+            } else {
+                // 7-bit: bits 0 and 6
+                bit = ((lfsr & 1) ^ ((lfsr >> 6) & 1));
+            }
+            
+            // Shift right and set high bit to feedback
+            lfsr = (lfsr >> 1) | (bit << 14);
+            
+            // Set output (0 = high, 1 = low)
+            data[i] = output ? -0.5 : 0.5;
+        }
+    }
+    
+    setLength(value) {
+        this.lengthCounter = 64 - (value & 0x3F);
+    }
+    
+    setEnvelope(value) {
+        // Initial volume (bits 4-7)
+        const initialVolume = (value >> 4) & 0x0F;
+        
+        // Envelope direction (bit 3)
+        this.envelopeDirection = (value & 0x08) ? 1 : 0;
+        
+        // Envelope sweep (bits 0-2)
+        this.envelopeSweep = value & 0x07;
+        
+        if (this.playing) {
+            this.setVolume(initialVolume / 15);
         }
         
-        return buffer;
+        // Reset envelope timer
+        this.envelopeTimer = this.envelopeSweep;
+        this.envelopeVolume = initialVolume;
     }
-
-    play() {
-        if (this.playing) return;
+    
+    setNoise(value) {
+        // Shift clock frequency (bits 4-7)
+        this.shiftFrequency = (value >> 4) & 0x0F;
+        
+        // Counter step (bit 3)
+        this.counterStep = (value & 0x08) ? 1 : 0;
+        
+        // Divisor code (bits 0-2)
+        this.divisorCode = value & 0x07;
+        
+        // Calculate actual divisor
+        this.divisor = this.divisorCode === 0 ? 8 : this.divisorCode * 16;
+        
+        // Update noise parameters
+        this.updateNoiseFrequency();
+    }
+    
+    setControl(value) {
+        // Enable length counter if bit 6 is set
+        this.lengthEnabled = (value & 0x40) !== 0;
+        
+        // Trigger channel if bit 7 is set
+        if (value & 0x80) {
+            this.trigger();
+        }
+    }
+    
+    trigger() {
+        // If length counter is 0, set it to 64
+        if (this.lengthCounter === 0) {
+            this.lengthCounter = 64;
+        }
+        
+        // Reset LFSR
+        this.lfsr = 0x7FFF;
+        
+        // Reset frequency timer
+        this.lfsrTimer = 0;
+        
+        // Set envelope timer and initial volume
+        const envelopeRegister = this.apu.memory.rb(0xFF21);
+        this.envelopeVolume = (envelopeRegister >> 4) & 0x0F;
+        this.envelopeTimer = this.envelopeSweep;
+        
+        // Start channel
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
         
-        // Connect and fade in
-        const now = this.audioContext.currentTime;
-        this.gainNode.gain.cancelScheduledValues(now);
-        this.gainNode.gain.setValueAtTime(0, now);
-        this.gainNode.gain.linearRampToValueAtTime(0.15, now + 0.01);
-        
-        this.gainNode.connect(this.destination);
-        this.clockLength = 0;
+        // Set volume based on envelope
+        this.setVolume(this.envelopeVolume / 15);
     }
-
-    stop() {
-        if (!this.playing) return;
-        
-        // Fade out
+    
+    setVolume(volume) {
+        // Apply volume with proper ramping to avoid clicks
         const now = this.audioContext.currentTime;
         this.gainNode.gain.cancelScheduledValues(now);
         this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
-        
-        // Disconnect after fade
-        setTimeout(() => {
-            if (!this.playing) {
-                this.gainNode.disconnect();
-            }
-        }, 60);
-        
-        this.playing = false;
-        this.apu.setSoundFlag(this.channelNumber, 0);
+        this.gainNode.gain.linearRampToValueAtTime(volume, now + 0.01);
     }
-
-    update(clockElapsed) {
-        if (!this.playing) return;
+    
+    updateNoiseFrequency() {
+        // Calculate period in CPU cycles
+        const period = this.divisor << this.shiftFrequency;
         
-        if (this.lengthCheck) {
-            this.clockLength  += clockElapsed;
-            if (this.clockLength > this.soundLengthUnit) {
-                this.soundLength--;
-                this.clockLength -= this.soundLengthUnit;
-                if (this.soundLength == 0) {
-                    this.setLength(0);
-                    this.stop();
+        // In a real implementation, we would update the noise frequency dynamically
+        // For this simplified version, we'll just regenerate the noise when parameters change
+        if (this.playing) {
+            this.generateNoise();
+        }
+    }
+    
+    updateEnvelope() {
+        if (!this.playing || this.envelopeSweep === 0) return;
+        
+        // Update envelope timer
+        if (--this.envelopeTimer <= 0) {
+            // Reset envelope timer
+            this.envelopeTimer = this.envelopeSweep;
+            
+            // If envelope sweep is 0, no volume adjustment
+            if (this.envelopeSweep === 0) return;
+            
+            // Update volume based on direction
+            if (this.envelopeDirection === 1) {
+                // Increase volume
+                if (this.envelopeVolume < 15) {
+                    this.envelopeVolume++;
+                    this.setVolume(this.envelopeVolume / 15);
+                }
+            } else {
+                // Decrease volume
+                if (this.envelopeVolume > 0) {
+                    this.envelopeVolume--;
+                    this.setVolume(this.envelopeVolume / 15);
                 }
             }
         }
     }
-
-    setLength(value) {
-        this.soundLength = 64 - (value & 0x3F);
-    }
     
-    // New method to support actually changing the noise properties
-    setNoiseProperties(divisor, shortMode, shiftClock) {
-        // Adjust filter frequency based on parameters
-        const frequencyBase = 1000 / (divisor || 1);
-        this.filter.frequency.value = Math.min(frequencyBase * (shiftClock || 1), 8000);
+    update(clockElapsed) {
+        if (!this.playing || !this.enabled) return;
         
-        // Recreate noise buffer for short mode if needed
-        if (this.shortMode !== shortMode) {
-            this.shortMode = shortMode;
-            this.noiseSource.disconnect();
+        // Update LFSR timer
+        this.lfsrTimer += clockElapsed;
+        
+        // Calculate period in CPU cycles
+        const period = this.divisor << this.shiftFrequency;
+        
+        // Process as many LFSR steps as needed based on elapsed time
+        while (this.lfsrTimer >= period) {
+            this.lfsrTimer -= period;
             
-            const newBuffer = this.createNoiseBuffer(this.audioContext);
-            const newSource = this.audioContext.createBufferSource();
-            newSource.buffer = newBuffer;
-            newSource.loop = true;
+            // Step LFSR
+            let bit;
+            if (this.counterStep === 0) {
+                // 15-bit mode
+                bit = ((this.lfsr & 1) ^ ((this.lfsr >> 1) & 1));
+            } else {
+                // 7-bit mode
+                bit = ((this.lfsr & 1) ^ ((this.lfsr >> 6) & 1));
+            }
             
-            newSource.connect(this.filter);
-            newSource.start(0);
-            this.noiseSource = newSource;
+            this.lfsr = (this.lfsr >> 1) | (bit << 14);
+            
+            // In a full implementation, we'd update the actual output
         }
-    }
-    
-    disable() {
-        this.stop();
-    }
-    
-    enable() {
-        // Ready for playing, but don't actually play
     }
 }

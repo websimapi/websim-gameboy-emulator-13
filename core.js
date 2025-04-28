@@ -19,7 +19,7 @@ const defaultOptions = {
     errorContainerId: 'error'
 };
 
-// Gameboy class with improved initialization and error handling
+// Gameboy class
 export class Gameboy {
     constructor(canvas, options) {
         options = options || {};
@@ -119,17 +119,15 @@ export class Gameboy {
         this.screen.setPixelSize(value);
     }
     
-    // Improved error handling for exceptions
     handleException(e) {
         if (e instanceof UnimplementedException) {
             if (e.fatal) {
                 this.error('This cartridge is not supported ('+ e.message +')');
             } else {
-                console.error(`Non-fatal error: ${e.message}`);
+                console.error(e.message);
             }
         } else {
-            console.error('Unhandled exception:', e);
-            this.error(`Error during emulation: ${e.message || 'Unknown error'}`);
+            throw e;
         }
     }
 }
