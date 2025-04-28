@@ -286,10 +286,25 @@ export class MBC3 {
         this.romBankNumber = 1;
         this.ramEnabled = true;
         this.extRam = new ExtRam();
+        // Add RTC support variables
+        this.rtcRegisters = new Uint8Array(5); // 5 RTC registers
+        this.rtcLatched = false;
+        this.rtcLatchValue = 0;
     }
 
     loadRam(game, size) {
         this.extRam.loadRam(game, size);
+        // Try to load saved RTC data
+        const rtcKey = game + '_RTC';
+        const savedRTC = localStorage.getItem(rtcKey);
+        if (savedRTC) {
+            try {
+                const rtcData = JSON.parse(savedRTC);
+                this.rtcRegisters = new Uint8Array(rtcData);
+            } catch (e) {
+                console.warn("Could not load RTC data:", e);
+            }
+        }
     }
 
     manageWrite(addr, value) {
@@ -298,6 +313,11 @@ export class MBC3 {
                 this.ramEnabled = (value & 0x0A) ? true : false;
                 if (this.ramEnabled) {
                     this.extRam.saveRamData();
+                    // Save RTC data too
+                    if (this.rtcRegisters) {
+                        const rtcKey = this.extRam.gameName + '_RTC';
+                        localStorage.setItem(rtcKey, JSON.stringify(Array.from(this.rtcRegisters)));
+                    }
                 }
                 break;
             case 0x2000: case 0x3000: // ROM bank number
@@ -306,20 +326,63 @@ export class MBC3 {
                 this.romBankNumber = value;
                 this.memory.loadRomBank(this.romBankNumber);
                 break;
-            case 0x4000: case 0x5000: // RAM bank
-                this.extRam.setRamBank(value);
+            case 0x4000: case 0x5000: // RAM bank or RTC register select
+                if (value <= 0x03) {
+                    // RAM bank
+                    this.extRam.setRamBank(value);
+                    this.rtcRegisterSelected = false;
+                } else if (value >= 0x08 && value <= 0x0C) {
+                    // RTC register
+                    this.rtcRegisterSelected = true;
+                    this.rtcRegisterIndex = value - 0x08;
+                }
                 break;
             case 0x6000: case 0x7000: // Latch clock data
-                throw new UnimplementedException('cartridge clock not supported', false);
+                // Instead of throwing an exception, implement a basic latch mechanism
+                if (this.rtcLatchValue == 0 && value == 1) {
+                    this.rtcLatched = !this.rtcLatched;
+                    this.updateRTC(); // Update RTC values when latching
+                }
+                this.rtcLatchValue = value;
                 break;
             case 0xA000: case 0xB000:
-                this.extRam.manageWrite(addr - 0xA000, value);
+                if (this.rtcRegisterSelected && this.rtcRegisterIndex >= 0 && this.rtcRegisterIndex < 5) {
+                    // Write to RTC register
+                    this.rtcRegisters[this.rtcRegisterIndex] = value;
+                } else {
+                    // Write to RAM
+                    this.extRam.manageWrite(addr - 0xA000, value);
+                }
                 break;
         }
     }
     
     readRam(addr) {
+        if (this.rtcRegisterSelected && this.rtcRegisterIndex >= 0 && this.rtcRegisterIndex < 5) {
+            // Read from RTC register
+            return this.rtcRegisters[this.rtcRegisterIndex];
+        }
+        // Read from RAM
         return this.extRam.manageRead(addr - 0xA000);
+    }
+
+    // Basic RTC implementation
+    updateRTC() {
+        // Simple implementation - just increment seconds counter
+        // In a full implementation, we would track real time
+        if (!this.rtcLatched) {
+            const now = new Date();
+            // Store seconds (0-59)
+            this.rtcRegisters[0] = now.getSeconds();
+            // Store minutes (0-59)
+            this.rtcRegisters[1] = now.getMinutes();
+            // Store hours (0-23)
+            this.rtcRegisters[2] = now.getHours();
+            // Store day counter lower 8 bits
+            this.rtcRegisters[3] = (now.getDate() & 0xFF);
+            // Store day counter high bit and flags
+            this.rtcRegisters[4] = 0; // Day counter bit 8, Halt flag, Day counter carry bit
+        }
     }
 }
 
