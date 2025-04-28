@@ -12,34 +12,50 @@ export class APU {
         this.enabled = false;
         this.needsUserInteraction = true;
         
-        // Create audio context (will be suspended until user interaction)
-        window.AudioContext = window.AudioContext || window.webkitAudioContext;
-        this.audioContext = new AudioContext();
-        
-        // Create master volume and panning controls
-        this.masterGain = this.audioContext.createGain();
-        this.masterGain.gain.value = 0.5; // Default volume
-        this.masterGain.connect(this.audioContext.destination);
-        
-        // Create individual channel gains for panning
-        this.leftGain = this.audioContext.createGain();
-        this.rightGain = this.audioContext.createGain();
-        this.leftGain.connect(this.masterGain);
-        this.rightGain.connect(this.masterGain);
-        
-        // Create audio channels
-        this.channel1 = new Channel1(this, 1, this.audioContext);
-        this.channel2 = new Channel1(this, 2, this.audioContext); // Channel2 uses Channel1 implementation
-        this.channel3 = new Channel3(this, 3, this.audioContext);
-        this.channel4 = new Channel4(this, 4, this.audioContext);
-        
-        // Connect to stereo channels based on initial panning (all channels to both outputs)
-        this.updatePanning(0xFF);
+        // Create audio context with error handling
+        try {
+            window.AudioContext = window.AudioContext || window.webkitAudioContext;
+            this.audioContext = new AudioContext();
+            
+            // Create master volume and panning controls
+            this.masterGain = this.audioContext.createGain();
+            this.masterGain.gain.value = 0.5; // Default volume
+            this.masterGain.connect(this.audioContext.destination);
+            
+            // Create individual channel gains for panning
+            this.leftGain = this.audioContext.createGain();
+            this.rightGain = this.audioContext.createGain();
+            this.leftGain.connect(this.masterGain);
+            this.rightGain.connect(this.masterGain);
+            
+            // Create audio channels
+            this.channel1 = new Channel1(this, 1, this.audioContext);
+            this.channel2 = new Channel1(this, 2, this.audioContext); // Channel2 uses Channel1 implementation
+            this.channel3 = new Channel3(this, 3, this.audioContext);
+            this.channel4 = new Channel4(this, 4, this.audioContext);
+            
+            // Connect to stereo channels based on initial panning (all channels to both outputs)
+            this.updatePanning(0xFF);
+        } catch (e) {
+            console.warn("Audio initialization failed:", e);
+            // Create dummy audio objects for graceful degradation
+            this.audioAvailable = false;
+            this.audioContext = null;
+            this.masterGain = null;
+            this.leftGain = null;
+            this.rightGain = null;
+            
+            // Create dummy channel objects
+            this.channel1 = new DummyChannel(this, 1);
+            this.channel2 = new DummyChannel(this, 2);
+            this.channel3 = new DummyChannel(this, 3);
+            this.channel4 = new DummyChannel(this, 4);
+        }
     }
 
     // Resume AudioContext after user interaction
     resume() {
-        if (this.audioContext.state === 'suspended') {
+        if (this.audioContext && this.audioContext.state === 'suspended') {
             this.audioContext.resume().then(() => {
                 this.needsUserInteraction = false;
                 console.log("AudioContext resumed successfully");
@@ -76,7 +92,7 @@ export class APU {
     // (in instructions) since last update
     update(clockElapsed) {
         if (this.enabled === false) return;
-        if (this.audioContext.state === 'suspended') return;
+        if (this.audioContext && this.audioContext.state === 'suspended') return;
 
         this.channel1.update(clockElapsed);
         this.channel2.update(clockElapsed);
@@ -95,17 +111,21 @@ export class APU {
     
     // Update volume based on NR50 register
     updateVolume(value) {
+        if (!this.audioContext) return;
+        
         // Bits 0-2: Right channel volume (0-7)
         const rightVolume = (value & 0x07) / 7;
         // Bits 4-6: Left channel volume (0-7)
         const leftVolume = ((value >> 4) & 0x07) / 7;
         
-        this.leftGain.gain.value = leftVolume;
-        this.rightGain.gain.value = rightVolume;
+        if (this.leftGain) this.leftGain.gain.value = leftVolume;
+        if (this.rightGain) this.rightGain.gain.value = rightVolume;
     }
     
     // Update panning based on NR51 register
     updatePanning(value) {
+        if (!this.audioContext) return;
+        
         // Bits 0-3: Channels 1-4 right enable
         // Bits 4-7: Channels 1-4 left enable
         const panningConfig = {
@@ -136,16 +156,22 @@ export class APU {
     
     // Connect/disconnect a channel to left/right outputs based on panning
     updateChannelPanning(channel, panning) {
+        if (!this.audioContext) return;
+        
         if (channel.gainNode) {
-            // First disconnect from both
-            channel.gainNode.disconnect();
-            
-            // Then connect to the appropriate outputs
-            if (panning.left) {
-                channel.gainNode.connect(this.leftGain);
-            }
-            if (panning.right) {
-                channel.gainNode.connect(this.rightGain);
+            try {
+                // First disconnect from both
+                channel.gainNode.disconnect();
+                
+                // Then connect to the appropriate outputs
+                if (panning.left) {
+                    channel.gainNode.connect(this.leftGain);
+                }
+                if (panning.right) {
+                    channel.gainNode.connect(this.rightGain);
+                }
+            } catch (e) {
+                console.warn("Error updating channel panning:", e);
             }
         }
     }
@@ -326,6 +352,30 @@ export class APU {
     }
 }
 
+// Dummy channel for when audio is not available
+class DummyChannel {
+    constructor(apu, channelNumber) {
+        this.apu = apu;
+        this.channelNumber = channelNumber;
+        this.playing = false;
+    }
+    
+    play() { this.playing = true; this.apu.setSoundFlag(this.channelNumber, 1); }
+    stop() { this.playing = false; this.apu.setSoundFlag(this.channelNumber, 0); }
+    update() {}
+    setFrequency() {}
+    getFrequency() { return 0; }
+    setLength() {}
+    setEnvelopeVolume() {}
+    setOutputLevel() {}
+    setDuty() {}
+    setWaveBufferByte() {}
+    updateWaveBuffer() {}
+    setNoiseParams() {}
+    enable() {}
+    disable() {}
+}
+
 // Channel 1 implementation (square wave with sweep)
 export class Channel1 {
     constructor(apu, channelNumber, audioContext) {
@@ -356,24 +406,39 @@ export class Channel1 {
         this.clockEnvelop = 0;
         this.clockSweep = 0;
 
-        // Create audio nodes
-        this.gainNode = audioContext.createGain();
-        this.gainNode.gain.value = 0;
-        
-        this.oscillator = audioContext.createOscillator();
-        this.oscillator.type = 'square';
-        this.oscillator.frequency.value = 440; // Default frequency
-        this.oscillator.connect(this.gainNode);
-        this.oscillator.start(0);
+        if (!audioContext) {
+            // Create dummy properties if audio context is not available
+            this.gainNode = null;
+            this.oscillator = null;
+            this.audioContext = null;
+            return;
+        }
 
-        this.audioContext = audioContext;
-        
-        // Set initial duty cycle
-        this.setDuty(this.duty);
+        // Create audio nodes
+        try {
+            this.gainNode = audioContext.createGain();
+            this.gainNode.gain.value = 0;
+            
+            this.oscillator = audioContext.createOscillator();
+            this.oscillator.type = 'square';
+            this.oscillator.frequency.value = 440; // Default frequency
+            this.oscillator.connect(this.gainNode);
+            this.oscillator.start(0);
+
+            this.audioContext = audioContext;
+            
+            // Set initial duty cycle
+            this.setDuty(this.duty);
+        } catch (e) {
+            console.warn("Failed to initialize audio channel:", e);
+            this.gainNode = null;
+            this.oscillator = null;
+            this.audioContext = null;
+        }
     }
 
     play() {
-        if (this.playing) return;
+        if (this.playing || !this.gainNode) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
         
@@ -395,7 +460,9 @@ export class Channel1 {
         if (!this.playing) return;
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        this.gainNode.gain.value = 0;
+        if (this.gainNode) {
+            this.gainNode.gain.value = 0;
+        }
     }
 
     checkFreqSweep() {
@@ -414,7 +481,7 @@ export class Channel1 {
     }
 
     update(clockElapsed) {
-        if (!this.playing) return;
+        if (!this.playing || !this.gainNode) return;
         
         // Update envelope
         if (this.envelopeStep > 0) {
@@ -471,6 +538,9 @@ export class Channel1 {
 
     setFrequency(value) {
         this.frequency = value;
+        
+        if (!this.oscillator) return;
+        
         // Convert Game Boy frequency to actual frequency in Hz
         // Formula: 131072 / (2048 - frequency) Hz
         const realFreq = 131072 / (2048 - (value & 0x7FF));
@@ -489,13 +559,15 @@ export class Channel1 {
     setEnvelopeVolume(volume) {
         this.envelopeVolume = volume & 0xF;
         // Only update gain if playing
-        if (this.playing) {
+        if (this.playing && this.gainNode) {
             this.gainNode.gain.value = this.envelopeVolume / 15;
         }
     }
     
     setDuty(dutyValue) {
         this.duty = dutyValue & 0x3;
+        
+        if (!this.oscillator || !this.audioContext) return;
         
         // Game Boy has 4 duty patterns: 12.5%, 25%, 50%, 75%
         // Web Audio only offers square wave (50%)
@@ -531,11 +603,23 @@ export class Channel1 {
     }
 
     disable() {
-        this.oscillator.disconnect();
+        if (this.oscillator) {
+            try {
+                this.oscillator.disconnect();
+            } catch (e) {
+                console.warn("Error disconnecting oscillator:", e);
+            }
+        }
     }
 
     enable() {
-        this.oscillator.connect(this.gainNode);
+        if (this.oscillator && this.gainNode) {
+            try {
+                this.oscillator.connect(this.gainNode);
+            } catch (e) {
+                console.warn("Error connecting oscillator:", e);
+            }
+        }
     }
 }
 
@@ -561,34 +645,66 @@ export class Channel3 {
             this.buffer[i] = 0;
         }
 
-        // Create audio nodes
-        this.gainNode = audioContext.createGain();
-        this.gainNode.gain.value = 0;
-        
-        // Create wave using AudioBuffer
-        this.baseSpeed = 65536; // Base sample rate for wave playback
-        this.waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
-        
-        // Create buffer source
-        this.createBufferSource();
+        if (!audioContext) {
+            // Create dummy properties if audio context is not available
+            this.gainNode = null;
+            this.waveBuffer = null;
+            this.bufferSource = null;
+            this.audioContext = null;
+            this.baseSpeed = 65536;
+            return;
+        }
 
-        this.audioContext = audioContext;
+        // Create audio nodes
+        try {
+            this.gainNode = audioContext.createGain();
+            this.gainNode.gain.value = 0;
+            
+            // Create wave using AudioBuffer
+            this.baseSpeed = 65536; // Base sample rate for wave playback
+            this.waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
+            
+            // Initialize buffer (no sound yet)
+            this.updateWaveBuffer();
+            
+            // Create buffer source
+            this.createBufferSource();
+
+            this.audioContext = audioContext;
+        } catch (e) {
+            console.warn("Failed to initialize wave channel:", e);
+            this.gainNode = null;
+            this.waveBuffer = null;
+            this.bufferSource = null;
+            this.audioContext = null;
+        }
     }
     
     createBufferSource() {
+        if (!this.audioContext || !this.gainNode || !this.waveBuffer) return;
+        
         // Create new buffer source (needed after each stop/start)
         if (this.bufferSource) {
-            this.bufferSource.disconnect();
+            try {
+                this.bufferSource.disconnect();
+            } catch (e) {
+                // Ignore disconnect errors
+            }
         }
         
-        this.bufferSource = this.audioContext.createBufferSource();
-        this.bufferSource.buffer = this.waveBuffer;
-        this.bufferSource.loop = true;
-        this.bufferSource.connect(this.gainNode);
+        try {
+            this.bufferSource = this.audioContext.createBufferSource();
+            this.bufferSource.buffer = this.waveBuffer;
+            this.bufferSource.loop = true;
+            this.bufferSource.connect(this.gainNode);
+        } catch (e) {
+            console.warn("Error creating buffer source:", e);
+            this.bufferSource = null;
+        }
     }
 
     play() {
-        if (this.playing || !this.dacPower) return;
+        if (this.playing || !this.dacPower || !this.bufferSource) return;
         
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
@@ -598,10 +714,18 @@ export class Channel3 {
         
         // Create new buffer source and start it
         this.createBufferSource();
-        this.bufferSource.start(0);
         
-        // Set volume based on output level
-        this.setOutputLevel(this.outputLevel);
+        if (this.bufferSource) {
+            try {
+                this.bufferSource.start(0);
+                
+                // Set volume based on output level
+                this.setOutputLevel(this.outputLevel);
+            } catch (e) {
+                console.warn("Error starting buffer source:", e);
+                this.playing = false;
+            }
+        }
         
         this.clockLength = 0;
     }
@@ -621,7 +745,9 @@ export class Channel3 {
             }
         }
         
-        this.gainNode.gain.value = 0;
+        if (this.gainNode) {
+            this.gainNode.gain.value = 0;
+        }
     }
 
     update(clockElapsed) {
@@ -643,22 +769,30 @@ export class Channel3 {
     setFrequency(value) {
         const frequency = value & 0x7FF;
         
-        // Convert GB frequency to playback rate
-        // Formula: 65536 / (2048 - frequency) Hz
-        const rate = 65536 / (2048 - frequency);
+        if (!this.bufferSource) return;
         
-        if (this.bufferSource) {
+        try {
+            // Convert GB frequency to playback rate
+            // Formula: 65536 / (2048 - frequency) Hz
+            const rate = 65536 / (2048 - frequency);
             this.bufferSource.playbackRate.value = rate / this.baseSpeed;
+        } catch (e) {
+            console.warn("Error setting frequency:", e);
         }
     }
 
     getFrequency() {
         if (!this.bufferSource) return 0;
         
-        const rate = this.bufferSource.playbackRate.value * this.baseSpeed;
-        const freq = 2048 - (65536 / rate);
-        
-        return Math.max(0, Math.min(0x7FF, Math.round(freq)));
+        try {
+            const rate = this.bufferSource.playbackRate.value * this.baseSpeed;
+            const freq = 2048 - (65536 / rate);
+            
+            return Math.max(0, Math.min(0x7FF, Math.round(freq)));
+        } catch (e) {
+            console.warn("Error getting frequency:", e);
+            return 0;
+        }
     }
 
     setLength(value) {
@@ -668,6 +802,8 @@ export class Channel3 {
     
     setOutputLevel(level) {
         this.outputLevel = level & 0x3;
+        
+        if (!this.gainNode) return;
         
         // Set gain based on output level
         // 0=mute, 1=100%, 2=50%, 3=25%
@@ -688,19 +824,36 @@ export class Channel3 {
     }
     
     updateWaveBuffer() {
-        // Update the actual AudioBuffer with current wave data
-        this.waveBuffer.copyToChannel(this.buffer, 0);
+        if (!this.waveBuffer) return;
+        
+        try {
+            // Update the actual AudioBuffer with current wave data
+            const channelData = this.waveBuffer.getChannelData(0);
+            for (let i = 0; i < 32; i++) {
+                channelData[i] = this.buffer[i];
+            }
+        } catch (e) {
+            console.warn("Error updating wave buffer:", e);
+        }
     }
 
     disable() {
         if (this.bufferSource) {
-            this.bufferSource.disconnect();
+            try {
+                this.bufferSource.disconnect();
+            } catch (e) {
+                console.warn("Error disconnecting buffer source:", e);
+            }
         }
     }
 
     enable() {
-        if (this.bufferSource) {
-            this.bufferSource.connect(this.gainNode);
+        if (this.bufferSource && this.gainNode) {
+            try {
+                this.bufferSource.connect(this.gainNode);
+            } catch (e) {
+                console.warn("Error connecting buffer source:", e);
+            }
         }
     }
 }
@@ -729,78 +882,120 @@ export class Channel4 {
         this.shiftFrequency = 0;
         this.counterStep = 0; // 0=15 bit, 1=7 bit
         this.dividerRatio = 0;
+
+        if (!audioContext) {
+            // Create dummy properties if audio context is not available
+            this.gainNode = null;
+            this.noiseBuffer = null;
+            this.bufferSource = null;
+            this.filter = null;
+            this.audioContext = null;
+            return;
+        }
         
         // Create audio nodes
-        this.gainNode = audioContext.createGain();
-        this.gainNode.gain.value = 0;
-        
-        // Create noise using AudioBuffer
-        this.noiseBuffer = null;
-        this.bufferSource = null;
-        
-        // Create bandpass filter to shape noise
-        this.filter = audioContext.createBiquadFilter();
-        this.filter.type = 'bandpass';
-        this.filter.frequency.value = 1000;
-        this.filter.Q.value = 1;
-        this.filter.connect(this.gainNode);
-        
-        this.audioContext = audioContext;
-        
-        // Generate initial noise buffer
-        this.generateNoiseBuffer();
+        try {
+            this.gainNode = audioContext.createGain();
+            this.gainNode.gain.value = 0;
+            
+            // Create bandpass filter to shape noise
+            this.filter = audioContext.createBiquadFilter();
+            this.filter.type = 'bandpass';
+            this.filter.frequency.value = 1000;
+            this.filter.Q.value = 1;
+            this.filter.connect(this.gainNode);
+            
+            this.audioContext = audioContext;
+            
+            // Generate initial noise buffer
+            this.generateNoiseBuffer();
+        } catch (e) {
+            console.warn("Failed to initialize noise channel:", e);
+            this.gainNode = null;
+            this.noiseBuffer = null;
+            this.bufferSource = null;
+            this.filter = null;
+            this.audioContext = null;
+        }
     }
     
     generateNoiseBuffer() {
-        // Create a buffer for white noise
-        const bufferSize = 2 * this.audioContext.sampleRate;
-        this.noiseBuffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
+        if (!this.audioContext) return;
         
-        // Fill buffer with random samples
-        const data = this.noiseBuffer.getChannelData(0);
-        
-        // Generate either 7-bit or 15-bit LFSR noise pattern
-        // This is a simplification, but approximates the Game Boy noise
-        const lfsr = (1 << 14) - 1; // Start with 15 bits set (except MSB)
-        const mask = this.counterStep ? 0x7F : 0x7FFF;
-        const xorBits = this.counterStep ? (1 << 6) : (1 << 14);
-        
-        for (let i = 0; i < bufferSize; i++) {
-            // Get least significant bit
-            const bit = lfsr & 1;
-            // Shift register
-            const newBit = ((lfsr ^ (lfsr >> 1)) & 1) << 14;
-            // Update LFSR
-            lfsr = ((lfsr >> 1) | newBit) & mask;
-            // Convert to audio sample (-1 or 1)
-            data[i] = bit ? -0.8 : 0.8;
+        try {
+            // Create a buffer for white noise
+            const bufferSize = 2 * this.audioContext.sampleRate;
+            this.noiseBuffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
+            
+            // Fill buffer with random samples
+            const data = this.noiseBuffer.getChannelData(0);
+            
+            // Generate either 7-bit or 15-bit LFSR noise pattern
+            // This is a simplification, but approximates the Game Boy noise
+            const lfsr = (1 << 14) - 1; // Start with 15 bits set (except MSB)
+            const mask = this.counterStep ? 0x7F : 0x7FFF;
+            const xorBits = this.counterStep ? (1 << 6) : (1 << 14);
+            
+            let lfsr_state = lfsr;
+            for (let i = 0; i < bufferSize; i++) {
+                // Get least significant bit
+                const bit = lfsr_state & 1;
+                // Shift register
+                const newBit = ((lfsr_state ^ (lfsr_state >> 1)) & 1) << 14;
+                // Update LFSR
+                lfsr_state = ((lfsr_state >> 1) | newBit) & mask;
+                // Convert to audio sample (-1 or 1)
+                data[i] = bit ? -0.8 : 0.8;
+            }
+        } catch (e) {
+            console.warn("Error generating noise buffer:", e);
+            this.noiseBuffer = null;
         }
     }
     
     createBufferSource() {
+        if (!this.audioContext || !this.filter || !this.noiseBuffer) return;
+        
         // Create new buffer source (needed after each stop/start)
         if (this.bufferSource) {
-            this.bufferSource.disconnect();
+            try {
+                this.bufferSource.disconnect();
+            } catch (e) {
+                // Ignore disconnect errors
+            }
         }
         
-        this.bufferSource = this.audioContext.createBufferSource();
-        this.bufferSource.buffer = this.noiseBuffer;
-        this.bufferSource.loop = true;
-        this.bufferSource.connect(this.filter);
+        try {
+            this.bufferSource = this.audioContext.createBufferSource();
+            this.bufferSource.buffer = this.noiseBuffer;
+            this.bufferSource.loop = true;
+            this.bufferSource.connect(this.filter);
+        } catch (e) {
+            console.warn("Error creating noise buffer source:", e);
+            this.bufferSource = null;
+        }
     }
 
     play() {
-        if (this.playing) return;
+        if (this.playing || !this.bufferSource) return;
         
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
         
         // Create new buffer source and start it
         this.createBufferSource();
-        this.bufferSource.start(0);
         
-        // Set initial volume based on envelope
-        this.setEnvelopeVolume(this.envelopeVolume);
+        if (this.bufferSource) {
+            try {
+                this.bufferSource.start(0);
+                
+                // Set initial volume based on envelope
+                this.setEnvelopeVolume(this.envelopeVolume);
+            } catch (e) {
+                console.warn("Error starting noise buffer source:", e);
+                this.playing = false;
+            }
+        }
         
         this.clockLength = 0;
         this.clockEnvelop = 0;
@@ -821,7 +1016,9 @@ export class Channel4 {
             }
         }
         
-        this.gainNode.gain.value = 0;
+        if (this.gainNode) {
+            this.gainNode.gain.value = 0;
+        }
     }
 
     update(clockElapsed) {
@@ -865,7 +1062,7 @@ export class Channel4 {
     setEnvelopeVolume(volume) {
         this.envelopeVolume = volume & 0xF;
         // Only update gain if playing
-        if (this.playing) {
+        if (this.playing && this.gainNode) {
             this.gainNode.gain.value = this.envelopeVolume / 15;
         }
     }
@@ -878,40 +1075,54 @@ export class Channel4 {
         // Bits 4-7: Shift frequency
         this.shiftFrequency = (value >> 4) & 0x0F;
         
-        // Calculate real frequency based on parameters
-        // Formula is complex, but we'll approximate it
-        let frequency;
-        if (this.dividerRatio === 0) {
-            frequency = 524288 / (1 << this.shiftFrequency) / 2;
-        } else {
-            frequency = 524288 / (this.dividerRatio * (1 << this.shiftFrequency)) / 2;
-        }
+        if (!this.filter) return;
         
-        // Limit to reasonable audio range
-        frequency = Math.min(20000, Math.max(50, frequency));
-        
-        // Update filter and playback rate
-        this.filter.frequency.value = frequency;
-        
-        // Regenerate noise buffer with new parameters
-        this.generateNoiseBuffer();
-        
-        if (this.playing) {
-            // Restart with new buffer
-            this.stop();
-            this.play();
+        try {
+            // Calculate real frequency based on parameters
+            // Formula is complex, but we'll approximate it
+            let frequency;
+            if (this.dividerRatio === 0) {
+                frequency = 524288 / (1 << this.shiftFrequency) / 2;
+            } else {
+                frequency = 524288 / (this.dividerRatio * (1 << this.shiftFrequency)) / 2;
+            }
+            
+            // Limit to reasonable audio range
+            frequency = Math.min(20000, Math.max(50, frequency));
+            
+            // Update filter and playback rate
+            this.filter.frequency.value = frequency;
+            
+            // Regenerate noise buffer with new parameters
+            this.generateNoiseBuffer();
+            
+            if (this.playing) {
+                // Restart with new buffer
+                this.stop();
+                this.play();
+            }
+        } catch (e) {
+            console.warn("Error setting noise parameters:", e);
         }
     }
 
     disable() {
         if (this.bufferSource) {
-            this.bufferSource.disconnect();
+            try {
+                this.bufferSource.disconnect();
+            } catch (e) {
+                console.warn("Error disconnecting noise buffer source:", e);
+            }
         }
     }
 
     enable() {
-        if (this.bufferSource) {
-            this.bufferSource.connect(this.filter);
+        if (this.bufferSource && this.filter) {
+            try {
+                this.bufferSource.connect(this.filter);
+            } catch (e) {
+                console.warn("Error connecting noise buffer source:", e);
+            }
         }
     }
 }
