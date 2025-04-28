@@ -1,0 +1,217 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf8"/>
+    <title>Gameboy emulator</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #222;
+            font-family: sans-serif;
+            color: white;
+        }
+        #container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .canvas-container {
+            background-color: #111;
+            padding: 20px;
+            display: inline-block;
+        }
+        canvas {
+            background-color: #c0c0c0;
+            display: block;
+        }
+        .hide {
+            display: none;
+        }
+        .commands {
+            margin: 10px 0;
+        }
+        #error {
+            color: #f55;
+            font-weight: bold;
+        }
+        .rom-section {
+            margin: 20px 0;
+            display: flex;
+        }
+        #rom-file, #rom-drop {
+            flex: 1;
+            padding: 10px;
+        }
+        #dropzone {
+            border: 2px dashed #666;
+            padding: 20px;
+            text-align: center;
+            background-color: #333;
+        }
+        .drag-active {
+            background-color: #444 !important;
+        }
+        table {
+            border-collapse: collapse;
+            margin: 10px 0;
+        }
+        th, td {
+            border: 1px solid #444;
+            padding: 5px 10px;
+        }
+        footer {
+            margin-top: 40px;
+            color: #777;
+        }
+        a {
+            color: #999;
+        }
+        #audio-permission {
+            background-color: #555;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            text-align: center;
+        }
+        #audio-permission button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 15px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 0;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Gameboy emulator</h1>
+</header>
+
+<div id="container">
+
+<div id="audio-permission" class="hide">
+    <p>This emulator requires audio permission for the best experience.</p>
+    <button id="enable-audio">Enable Audio</button>
+</div>
+
+<div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
+
+<p class="commands">
+    <button onclick="g.pause(true);">Pause</button>
+    <button onclick="g.pause(false);">Run</button>
+</p>
+<p class="commands">
+    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
+</p>
+<p class="commands">
+    <label>
+        Screen zoom
+        <select id="screen-zoom" onchange="g.setScreenZoom(this.value);">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="3">3</option>
+        </select>
+    </label>
+</p>
+
+<p>
+    <span id="status"></span> <span id="game-name"></span>
+</p>
+<p id="error" class="hide"></p>
+
+<div class="rom-section">
+    <div id="rom-file">
+        <label>Choose a ROM file on your computer: <input type="file" id="file"/></label>
+    </div>
+
+    <div id="rom-drop">
+        <div id="dropzone">
+            <p>
+                Or drop a ROM file here
+            </p>
+        </div>
+    </div>
+</div>
+
+<div id="keyboard-info">
+    <p>Current keyboard mapping:</p>
+    <table>
+    <thead>
+        <tr><th>Gameboy pad</th><th>Keyboard mapping</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>A</td><td>G</td></tr>
+        <tr><td>B</td><td>B</td></tr>
+        <tr><td>START</td><td>H</td></tr>
+        <tr><td>SELECT</td><td>N</td></tr>
+        <tr><td>Directional pad</td><td>Arrow keys</td></tr>
+    </tbody>
+    </table>
+</div>
+
+<footer>by <a href="https://github.com/juchi">@Juchi</a> | Follow me on <a href="https://twitter.com/j_chichignoud">Twitter</a></footer>
+
+</div>
+
+<script src="./gameboy.js"></script>
+
+<script>
+// Audio context initialization
+let audioContext = null;
+var g; // Make g variable global
+
+function initAudio() {
+    try {
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioContext = new AudioContext();
+        
+        // If audio context is suspended (needs user interaction)
+        if (audioContext.state === 'suspended') {
+            document.getElementById('audio-permission').classList.remove('hide');
+        } else {
+            setupGameboy();
+        }
+    } catch (e) {
+        console.error("Web Audio API is not supported in this browser");
+        setupGameboy();
+    }
+}
+
+document.getElementById('enable-audio').addEventListener('click', function() {
+    if (audioContext) {
+        audioContext.resume().then(() => {
+            document.getElementById('audio-permission').classList.add('hide');
+            setupGameboy();
+        });
+    }
+});
+
+// configuration
+function setupGameboy() {
+    var opts = {
+        romReaders: [
+            new GameboyJS.RomFileReader(),
+            new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
+        ]
+    };
+    g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
+    g.setSoundEnabled(document.getElementById('sound-enable').checked);
+    g.setScreenZoom(document.getElementById('screen-zoom').value);
+}
+
+// When document is loaded, initialize the Audio
+document.addEventListener('DOMContentLoaded', function() {
+    initAudio();
+});
+</script>
+
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
