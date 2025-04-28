@@ -59,8 +59,8 @@
 <div class="canvas-container"><canvas id="canvas">Your browser does not seem to support canvas.</canvas></div>
 
 <div class="commands">
-    <button onclick="g.pause(true);">Pause</button>
-    <button onclick="g.pause(false);">Run</button>
+    <button onclick="if(window.g)g.pause(true);">Pause</button>
+    <button onclick="if(window.g)g.pause(false);">Run</button>
     <button id="debug-toggle" onclick="toggleDebugMode();">Debug Mode</button>
 </div>
 
@@ -70,12 +70,12 @@
 </div>
 
 <p class="commands">
-    <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound</label>
+    <label><input id="sound-enable" type="checkbox" checked onchange="if(window.g)g.setSoundEnabled(this.checked);"/> Enable sound</label>
 </p>
 <p class="commands">
     <label>
         Screen zoom
-        <select id="screen-zoom" onchange="g.setScreenZoom(this.value);">
+        <select id="screen-zoom" onchange="if(window.g)g.setScreenZoom(this.value);">
             <option value="1">1</option>
             <option value="2" selected>2</option>
             <option value="3">3</option>
@@ -143,7 +143,7 @@ toggleSwitch.addEventListener('change', function() {
 
 // Function to toggle debug mode
 function toggleDebugMode() {
-    if (g) {
+    if (window.g) {
         const isEnabled = g.toggleDebugger();
         document.getElementById('debug-toggle').textContent = isEnabled ? 'Disable Debug' : 'Enable Debug';
     }
@@ -151,7 +151,7 @@ function toggleDebugMode() {
 
 // Emulation speed control
 function updateEmulationSpeed() {
-    if (g) {
+    if (window.g) {
         const speedSlider = document.getElementById('emulation-speed');
         const speed = parseFloat(speedSlider.value);
         g.setSpeed(speed);
@@ -163,6 +163,7 @@ function updateEmulationSpeed() {
 let lastTime = performance.now();
 let frames = 0;
 let fps = 60;
+let performanceMonitorActive = false;
 
 function updatePerformanceDisplay() {
     const now = performance.now();
@@ -178,10 +179,10 @@ function updatePerformanceDisplay() {
         if (display) {
             // Display FPS and also show info from CPU if available
             let info = `FPS: ${fps.toFixed(1)}`;
-            if (g && g.cpu) {
-                info += ` | Instructions: ${g.cpu.totalInstructions}`;
-                if (g.cpu.currentFps) {
-                    info += ` | CPU: ${g.cpu.currentFps.toFixed(1)}fps`;
+            if (typeof window.g !== 'undefined' && window.g && window.g.cpu) {
+                info += ` | Instructions: ${window.g.cpu.totalInstructions}`;
+                if (window.g.cpu.currentFps) {
+                    info += ` | CPU: ${window.g.cpu.currentFps.toFixed(1)}fps`;
                 }
             }
             display.textContent = info;
@@ -192,8 +193,13 @@ function updatePerformanceDisplay() {
     requestAnimationFrame(updatePerformanceDisplay);
 }
 
-// Start performance monitoring
-requestAnimationFrame(updatePerformanceDisplay);
+// Start performance monitoring when document is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    if (!performanceMonitorActive) {
+        performanceMonitorActive = true;
+        requestAnimationFrame(updatePerformanceDisplay);
+    }
+});
 
 // Load the appropriate implementation
 if (useOriginal) {
