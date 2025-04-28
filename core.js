@@ -1,4 +1,4 @@
-// core.js - Main Gameboy class and integration
+// core.js - Updates to integrate the debugger
 
 import { Util } from './utils.js';
 import { CPU } from './cpu.js';
@@ -8,6 +8,7 @@ import { Input } from './input.js';
 import { Rom } from './rom.js';
 import { UnimplementedException } from './utils.js';
 import { loadboot } from './bootrom.js';
+import { DebugSystem } from './debug.js';
 
 // Define default options
 const defaultOptions = {
@@ -16,7 +17,8 @@ const defaultOptions = {
     romReaders: [],
     statusContainerId: 'status',
     gameNameContainerId: 'game-name',
-    errorContainerId: 'error'
+    errorContainerId: 'error',
+    debugMode: false
 };
 
 // Gameboy class
@@ -39,6 +41,11 @@ export class Gameboy {
         this.screen = screen;
         this.input = input;
         this.pad = pad;
+
+        // Initialize debugger if enabled
+        if (this.options.debugMode) {
+            this.debugger = new DebugSystem(this);
+        }
 
         this.createRom(this.options.romReaders);
 
@@ -71,6 +78,10 @@ export class Gameboy {
             this.setStatus('Game Running :');
             this.setGameName(this.cpu.getGameName());
             this.cpu.run();
+            
+            if (this.debugger) {
+                this.debugger.log(`Game started: ${this.cpu.getGameName()}`);
+            }
         } catch (e) {
             this.handleException(e);
         }
@@ -85,11 +96,26 @@ export class Gameboy {
             this.cpu.unpause();
         }
     }
+    
+    toggleDebugger() {
+        if (this.debugger) {
+            const isEnabled = this.debugger.toggle();
+            return isEnabled;
+        } else {
+            this.debugger = new DebugSystem(this);
+            this.debugger.toggle();
+            return true;
+        }
+    }
 
     error(message) {
         this.setStatus('Error during execution');
         this.setError('An error occurred during execution:' + message);
         this.cpu.stop();
+        
+        if (this.debugger) {
+            this.debugger.log(`ERROR: ${message}`);
+        }
     }
 
     setStatus(status) {
@@ -120,14 +146,17 @@ export class Gameboy {
     }
     
     handleException(e) {
-        if (e instanceof UnimplementedException) {
+        if (this.debugger) {
+            this.debugger.handleError(e, 'Gameboy Execution');
+        } else if (e instanceof UnimplementedException) {
             if (e.fatal) {
                 this.error('This cartridge is not supported ('+ e.message +')');
             } else {
                 console.error(e.message);
             }
         } else {
-            throw e;
+            this.error(e.message || String(e));
+            console.error(e);
         }
     }
 }

@@ -1,4 +1,6 @@
-// audio.js - Audio Processing Unit with Web Worker support
+// audio.js - Audio Processing Unit and sound channels implementation
+
+import { Util } from './utils.js';
 
 // Audio Processing unit
 // Listens the write accesses to the audio-reserved memory addresses
@@ -8,158 +10,36 @@ export class APU {
         this.memory = memory;
         this.enabled = false;
 
-        // Set up Web Audio context
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
-        try {
-            this.audioContext = new AudioContext();
-        } catch (e) {
-            console.warn('Web Audio API not supported in this browser.');
-            this.audioContext = null;
-        }
+        this.audioContext = new AudioContext();
 
-        // Initialize audio channels
         this.channel1 = new Channel1(this, 1, this.audioContext);
         this.channel2 = new Channel1(this, 2, this.audioContext);
         this.channel3 = new Channel3(this, 3, this.audioContext);
         this.channel4 = new Channel4(this, 4, this.audioContext);
-        
-        // Track state and registers for fallback when worker fails
-        this.registers = {};
-        this.useWorker = typeof Worker !== 'undefined';
-        
-        // Initialize worker with error handling
-        if (this.useWorker) {
-            this.initializeWorker();
-        } else {
-            console.warn('Web Workers not supported in this browser. Audio processing will run on the main thread.');
-        }
-    }
-
-    initializeWorker() {
-        try {
-            // Create Web Worker for audio processing
-            this.worker = new Worker('./audio-worker.js');
-            
-            // Set up message handler for worker communication
-            this.worker.onmessage = (e) => {
-                if (e.data.type === 'state') {
-                    this.updateFromWorker(e.data.data);
-                } else if (e.data.type === 'error') {
-                    console.error('Audio worker error:', e.data.message);
-                    this.useWorker = false;
-                }
-            };
-            
-            // Handle worker errors
-            this.worker.onerror = (e) => {
-                console.error('Audio worker failed to initialize:', e.message);
-                this.useWorker = false;
-            };
-        } catch (e) {
-            console.error('Failed to create audio worker:', e);
-            this.useWorker = false;
-        }
-    }
-
-    // Update audio state from worker data
-    updateFromWorker(data) {
-        if (!data || !data.channels) return;
-        
-        // Update each channel from worker data
-        for (let channelNum = 1; channelNum <= 4; channelNum++) {
-            const channelData = data.channels[channelNum];
-            const channel = this.getChannel(channelNum);
-            
-            if (channel && channelData) {
-                // Update audio node parameters based on worker data
-                if (channelData.playing !== undefined && 
-                    channelData.playing !== channel.playing) {
-                    if (channelData.playing) {
-                        channel.connect();
-                    } else {
-                        channel.disconnect();
-                    }
-                    channel.playing = channelData.playing;
-                }
-                
-                if (channelData.frequency !== undefined && 
-                    channelData.frequency !== channel.frequency) {
-                    channel.setFrequency(channelData.frequency);
-                }
-                
-                if (channelData.volume !== undefined && 
-                    channelData.volume !== channel.envelopeVolume) {
-                    channel.setEnvelopeVolume(channelData.volume);
-                }
-                
-                // For channel 3, update wave buffer if needed
-                if (channelNum === 3 && channelData.waveBuffer) {
-                    channel.updateWaveBuffer(channelData.waveBuffer);
-                }
-            }
-        }
-    }
-
-    // Get channel by number
-    getChannel(channelNum) {
-        switch (channelNum) {
-            case 1: return this.channel1;
-            case 2: return this.channel2;
-            case 3: return this.channel3;
-            case 4: return this.channel4;
-            default: return null;
-        }
     }
 
     connect() {
-        this.enabled = true;
         this.channel1.enable();
         this.channel2.enable();
         this.channel3.enable();
-        if (this.useWorker && this.worker) {
-            this.worker.postMessage({ type: 'enable', value: true });
-        }
     }
 
     disconnect() {
-        this.enabled = false;
         this.channel1.disable();
         this.channel2.disable();
         this.channel3.disable();
-        if (this.useWorker && this.worker) {
-            this.worker.postMessage({ type: 'enable', value: false });
-        }
     }
 
     // Updates the states of each channel given the elapsed time
     // (in instructions) since last update
     update(clockElapsed) {
-        if (!this.enabled) return;
-        
-        // If using worker, send update request to worker
-        if (this.useWorker && this.worker) {
-            try {
-                this.worker.postMessage({ 
-                    type: 'update', 
-                    elapsedCycles: clockElapsed 
-                });
-            } catch (e) {
-                console.error('Error sending message to audio worker:', e);
-                this.useWorker = false;
-            }
-        } else {
-            // Fallback: basic update on main thread
-            // This is a simplified version that won't do full audio processing
-            // but will at least keep the emulator running
-            this.updateBasic(clockElapsed);
-        }
-    }
+        if (this.enabled == false) return;
 
-    // Basic update function for when worker is not available
-    updateBasic(clockElapsed) {
-        // Simple update that just keeps track of envelope timing
-        // This is a minimal implementation to keep the emulator running
-        // without full audio processing
+        this.channel1.update(clockElapsed);
+        this.channel2.update(clockElapsed);
+        this.channel3.update(clockElapsed);
+        this.channel4.update(clockElapsed);
     }
 
     setSoundFlag(channel, value) {
@@ -177,49 +57,130 @@ export class APU {
         if (this.enabled == false && addr < APU.registers.NR52) {
             return;
         }
-        
-        // Store register value locally
-        this.registers[addr] = value;
         this.memory[addr] = value;
 
-        // If using worker, send register write to worker
-        if (this.useWorker && this.worker) {
-            try {
-                this.worker.postMessage({
-                    type: 'write',
-                    address: addr,
-                    value: value
-                });
-            } catch (e) {
-                console.error('Error sending write message to audio worker:', e);
-                this.useWorker = false;
-            }
-        }
-
-        // Handle special cases for direct Web Audio API interaction
         switch (addr) {
-            case APU.registers.NR14: // Channel 1 control
+            // Channel 1 addresses
+            case 0xFF10:
+                this.channel1.clockSweep = 0;
+                this.channel1.sweepTime = ((value & 0x70) >> 4);
+                this.channel1.sweepSign = (value & 0x08) ? -1 : 1;
+                this.channel1.sweepShifts = (value & 0x07);
+                this.channel1.sweepCount = this.channel1.sweepShifts;
+                break;
+            case 0xFF11:
+                // todo : bits 6-7
+                this.channel1.setLength(value & 0x3F);
+                break;
+            case 0xFF12:
+                this.channel1.envelopeSign = (value & 0x08) ? 1 : -1;
+                var envelopeVolume = (value & 0xF0) >> 4;
+                this.channel1.setEnvelopeVolume(envelopeVolume);
+                this.channel1.envelopeStep = (value & 0x07);
+                break;
+            case 0xFF13:
+                var frequency = this.channel1.getFrequency();
+                frequency &= 0xF00;
+                frequency |= value;
+                this.channel1.setFrequency(frequency);
+                break;
+            case 0xFF14:
+                var frequency = this.channel1.getFrequency();
+                frequency &= 0xFF;
+                frequency |= (value & 7) << 8;
+                this.channel1.setFrequency(frequency);
+                this.channel1.lengthCheck = (value & 0x40) ? true : false;
                 if (value & 0x80) this.channel1.play();
                 break;
-            case APU.registers.NR24: // Channel 2 control
-                if (value & 0x80) this.channel2.play();
+
+            // Channel 2 addresses
+            case 0xFF16:
+                // todo : bits 6-7
+                this.channel2.setLength(value & 0x3F);
                 break;
-            case APU.registers.NR34: // Channel 3 control
-                if (value & 0x80) this.channel3.play();
+            case 0xFF17:
+                this.channel2.envelopeSign = (value & 0x08) ? 1 : -1;
+                var envelopeVolume = (value & 0xF0) >> 4;
+                this.channel2.setEnvelopeVolume(envelopeVolume);
+                this.channel2.envelopeStep = (value & 0x07);
                 break;
-            case APU.registers.NR44: // Channel 4 control
-                if (value & 0x80) this.channel4.play();
+            case 0xFF18:
+                var frequency = this.channel2.getFrequency();
+                frequency &= 0xF00;
+                frequency |= value;
+                this.channel2.setFrequency(frequency);
                 break;
-            case APU.registers.NR52: // Global audio control
-                this.enabled = (value & 0x80) != 0;
+            case 0xFF19:
+                var frequency = this.channel2.getFrequency();
+                frequency &= 0xFF;
+                frequency |= (value & 7) << 8;
+                this.channel2.setFrequency(frequency);
+                this.channel2.lengthCheck = (value & 0x40) ? true : false;
+                if (value & 0x80) {
+                    this.channel2.play();
+                }
+                break;
+
+            // Channel 3 addresses
+            case 0xFF1A:
+                // todo
+                break;
+            case 0xFF1B:
+                this.channel3.setLength(value);
+                break;
+            case 0xFF1C:
+                // todo
+                break;
+            case 0xFF1D:
+                var frequency = this.channel3.getFrequency();
+                frequency &= 0xF00;
+                frequency |= value;
+                this.channel3.setFrequency(frequency);
+                break;
+            case 0xFF1E:
+                var frequency = this.channel3.getFrequency();
+                frequency &= 0xFF;
+                frequency |= (value & 7) << 8;
+                this.channel3.setFrequency(frequency);
+                this.channel3.lengthCheck = (value & 0x40) ? true : false;
+                if (value & 0x80) {
+                    this.channel3.play();
+                }
+                break;
+
+            // Channel 4 addresses
+            case 0xFF20:
+                this.channel4.setLength(value & 0x3F);
+                break;
+            case 0xFF21:
+                // todo
+                break;
+            case 0xFF22:
+                // todo
+                break;
+            case 0xFF23:
+                this.channel4.lengthCheck = (value & 0x40) ? true : false;
+                if (value & 0x80) {
+                    this.channel4.play();
+                }
+                break;
+
+            // channel 3 wave bytes
+            case 0xFF30: case 0xFF31: case 0xFF32: case 0xFF33: case 0xFF34: case 0xFF35: case 0xFF36: case 0xFF37:
+            case 0xFF38: case 0xFF39: case 0xFF3A: case 0xFF3B: case 0xFF3C: case 0xFF3D: case 0xFF3E: case 0xFF3F:
+                var index = addr - 0xFF30;
+                this.channel3.setWaveBufferByte(index, value);
+                break;
+
+            // general audio switch
+            case 0xFF26:
+                value &= 0xF0;
+                this.memory[addr] = value;
+                this.enabled = (value & 0x80) == 0 ? false : true;
                 if (!this.enabled) {
-                    this.channel1.stop();
-                    this.channel2.stop();
-                    this.channel3.stop();
-                    this.channel4.stop();
-                    // Clear registers
                     for (var i = 0xFF10; i < 0xFF27; i++)
                         this.memory[i] = 0;
+                    // todo stop sound
                 }
                 break;
         }
@@ -262,126 +223,134 @@ export class Channel1 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
+
+        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
+        this.soundLength = 64; // defaults to 64 periods
+        this.lengthCheck = false;
+
+        this.sweepTime = 0; // from 0 to 7
+        this.sweepStepLength = 0x8000; // 1 / 128 seconds of instructions
+        this.sweepCount = 0;
+        this.sweepShifts = 0;
+        this.sweepSign = 1; // +1 / -1 for increase / decrease freq
+
         this.frequency = 0;
-        this.envelopeVolume = 0;
 
-        // Handle no audio context case
-        if (!audioContext) {
-            return;
-        }
+        this.envelopeStep = 0;
+        this.envelopeStepLength = 0x10000;// 1 / 64 seconds of instructions
+        this.envelopeCheck = false;
+        this.envelopeSign = 1;
 
-        try {
-            // Create audio nodes
-            var gainNode = audioContext.createGain();
-            gainNode.gain.value = 0;
-            
-            var oscillator = audioContext.createOscillator();
-            oscillator.type = 'square';
-            oscillator.frequency.value = 1000;
-            oscillator.connect(gainNode);
-            oscillator.start(0);
+        this.clockLength = 0;
+        this.clockEnvelop = 0;
+        this.clockSweep = 0;
 
-            this.audioContext = audioContext;
-            this.gainNode = gainNode;
-            this.oscillator = oscillator;
-        } catch (e) {
-            console.error('Error creating audio nodes:', e);
-        }
+        var gainNode = audioContext.createGain();
+        gainNode.gain.value = 0;
+        var oscillator = audioContext.createOscillator();
+        oscillator.type = 'square';
+        oscillator.frequency.value = 1000;
+        oscillator.connect(gainNode);
+        oscillator.start(0);
+
+        this.audioContext = audioContext;
+        this.gainNode = gainNode;
+        this.oscillator = oscillator;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        
-        if (this.gainNode && this.audioContext) {
-            try {
-                this.gainNode.connect(this.audioContext.destination);
-            } catch (e) {
-                console.error('Error connecting audio node:', e);
-            }
-        }
-        
-        // Notify worker to start playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'play',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending play message to worker:', e);
-            }
-        }
+        this.gainNode.connect(this.audioContext.destination);
+        this.clockLength = 0;
+        this.clockEnvelop = 0;
+        this.clockSweep = 0;
+        if (this.sweepShifts > 0) this.checkFreqSweep();
     }
 
     stop() {
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        
-        if (this.gainNode) {
-            try {
-                this.gainNode.disconnect();
-            } catch (e) {
-                console.error('Error disconnecting audio node:', e);
+        this.gainNode.disconnect();
+    }
+
+    checkFreqSweep() {
+        var oldFreq = this.getFrequency();
+        var newFreq = oldFreq + this.sweepSign * (oldFreq >> this.sweepShifts);
+        if (newFreq > 0x7FF) {
+            newFreq = 0;
+            this.stop();
+        }
+
+        return newFreq;
+    }
+
+    update(clockElapsed) {
+        this.clockEnvelop += clockElapsed;
+        this.clockSweep   += clockElapsed;
+
+        if ((this.sweepCount || this.sweepTime) && this.clockSweep > (this.sweepStepLength * this.sweepTime)) {
+            this.clockSweep -= (this.sweepStepLength * this.sweepTime);
+            this.sweepCount--;
+
+            var newFreq = this.checkFreqSweep(); // process and check new freq
+
+            this.apu.memory[0xFF13] = newFreq & 0xFF;
+            this.apu.memory[0xFF14] &= 0xF8;
+            this.apu.memory[0xFF14] |= (newFreq & 0x700) >> 8;
+            this.setFrequency(newFreq);
+
+            this.checkFreqSweep(); // check again with new value
+        }
+
+        if (this.envelopeCheck && this.clockEnvelop > this.envelopeStepLength) {
+            this.clockEnvelop -= this.envelopeStepLength;
+            this.envelopeStep--;
+            this.setEnvelopeVolume(this.envelopeVolume + this.envelopeSign);
+            if (this.envelopeStep <= 0) {
+                this.envelopeCheck = false;
             }
         }
-        
-        // Notify worker to stop playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'stop',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending stop message to worker:', e);
+
+        if (this.lengthCheck) {
+            this.clockLength  += clockElapsed;
+            if (this.clockLength > this.soundLengthUnit) {
+                this.soundLength--;
+                this.clockLength -= this.soundLengthUnit;
+                if (this.soundLength == 0) {
+                    this.setLength(0);
+                    this.stop();
+                }
             }
         }
     }
 
     setFrequency(value) {
         this.frequency = value;
-        // Convert GB frequency to Hz
-        if (this.oscillator) {
-            try {
-                this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
-            } catch (e) {
-                console.error('Error setting oscillator frequency:', e);
-            }
-        }
+        this.oscillator.frequency.value = 131072 / (2048 - this.frequency);
+    }
+
+    getFrequency() {
+        return this.frequency;
+    }
+
+    setLength(value) {
+        this.soundLength = 64 - (value & 0x3F);
     }
 
     setEnvelopeVolume(volume) {
+        this.envelopeCheck = volume > 0 && volume < 16 ? true : false;
         this.envelopeVolume = volume;
-        // Scale volume to gain (0-15 to 0-0.15)
-        if (this.gainNode) {
-            try {
-                this.gainNode.gain.value = this.envelopeVolume * 1/100;
-            } catch (e) {
-                console.error('Error setting gain value:', e);
-            }
-        }
+        this.gainNode.gain.value = this.envelopeVolume * 1/100;
     }
 
-    disconnect() {
-        if (this.oscillator) {
-            try {
-                this.oscillator.disconnect();
-            } catch (e) {
-                console.error('Error disconnecting oscillator:', e);
-            }
-        }
+    disable() {
+        this.oscillator.disconnect();
     }
 
-    connect() {
-        if (this.oscillator && this.gainNode) {
-            try {
-                this.oscillator.connect(this.gainNode);
-            } catch (e) {
-                console.error('Error connecting oscillator to gain node:', e);
-            }
-        }
+    enable() {
+        this.oscillator.connect(this.gainNode);
     }
 }
 
@@ -391,159 +360,90 @@ export class Channel3 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
-        this.frequency = 0;
 
-        // Create buffer for wave data
+        this.soundLength = 0;
+        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
+        this.lengthCheck = false;
+
+        this.clockLength = 0;
+
         this.buffer = new Float32Array(32);
 
-        // Handle no audio context case
-        if (!audioContext) {
-            return;
-        }
+        var gainNode = audioContext.createGain();
+        gainNode.gain.value = 1;
+        this.gainNode = gainNode;
 
-        try {
-            // Create audio nodes
-            var gainNode = audioContext.createGain();
-            gainNode.gain.value = 1;
-            this.gainNode = gainNode;
+        this.baseSpeed = 65536;
+        var waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
 
-            this.baseSpeed = 65536;
-            var waveBuffer = audioContext.createBuffer(1, 32, this.baseSpeed);
+        var bufferSource = audioContext.createBufferSource();
+        bufferSource.buffer = waveBuffer;
+        bufferSource.loop = true;
+        bufferSource.connect(gainNode);
+        bufferSource.start(0);
 
-            var bufferSource = audioContext.createBufferSource();
-            bufferSource.buffer = waveBuffer;
-            bufferSource.loop = true;
-            bufferSource.connect(gainNode);
-            bufferSource.start(0);
-
-            this.audioContext = audioContext;
-            this.waveBuffer = waveBuffer;
-            this.bufferSource = bufferSource;
-        } catch (e) {
-            console.error('Error creating wave channel audio nodes:', e);
-        }
+        this.audioContext = audioContext;
+        this.waveBuffer = waveBuffer;
+        this.bufferSource = bufferSource;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        
-        // Copy wave buffer data to audio buffer
-        if (this.waveBuffer && this.gainNode && this.audioContext) {
-            try {
-                this.waveBuffer.copyToChannel(this.buffer, 0, 0);
-                this.gainNode.connect(this.audioContext.destination);
-            } catch (e) {
-                console.error('Error starting wave playback:', e);
-            }
-        }
-        
-        // Notify worker to start playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'play',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending play message to worker:', e);
-            }
-        }
+        this.waveBuffer.copyToChannel(this.buffer, 0, 0);
+
+        this.gainNode.connect(this.audioContext.destination);
+        this.clockLength = 0;
     }
 
     stop() {
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        
-        if (this.gainNode) {
-            try {
-                this.gainNode.disconnect();
-            } catch (e) {
-                console.error('Error disconnecting gain node:', e);
-            }
-        }
-        
-        // Notify worker to stop playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'stop',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending stop message to worker:', e);
+        this.gainNode.disconnect();
+    }
+
+    update(clockElapsed) {
+        if (this.lengthCheck){
+            this.clockLength  += clockElapsed;
+            if (this.clockLength > this.soundLengthUnit) {
+                this.soundLength--;
+                this.clockLength -= this.soundLengthUnit;
+                if (this.soundLength == 0) {
+                    this.setLength(0);
+                    this.stop();
+                }
             }
         }
     }
 
     setFrequency(value) {
-        this.frequency = value;
-        // Convert GB frequency to playback rate
-        if (this.bufferSource) {
-            try {
-                const rate = 65536 / (2048 - value);
-                this.bufferSource.playbackRate.value = rate / this.baseSpeed;
-            } catch (e) {
-                console.error('Error setting buffer source playback rate:', e);
-            }
-        }
+        value = 65536 / (2048  - value);
+        this.bufferSource.playbackRate.value = value / this.baseSpeed;
     }
 
-    updateWaveBuffer(bufferData) {
-        // Update local buffer from worker data
-        for (let i = 0; i < 32 && i < bufferData.length; i++) {
-            this.buffer[i] = bufferData[i];
-        }
-        
-        // Apply to audio buffer if playing
-        if (this.playing && this.waveBuffer) {
-            try {
-                this.waveBuffer.copyToChannel(this.buffer, 0, 0);
-            } catch (e) {
-                console.error('Error updating wave buffer:', e);
-            }
-        }
+    getFrequency() {
+        var freq = 2048 - 65536 / (this.bufferSource.playbackRate.value * this.baseSpeed);
+        return freq | 1;
+    }
+
+    setLength(value) {
+        this.soundLength = 256 - value;
     }
 
     setWaveBufferByte(index, value) {
         var bufferIndex = index * 2;
-        // Convert wave data from byte to -1.0 to 1.0 float samples
-        this.buffer[bufferIndex] = (value >> 4) / 8 - 1; 
+
+        this.buffer[bufferIndex]   = (value >> 4) / 8 - 1; // value in buffer is in -1 -> 1
         this.buffer[bufferIndex+1] = (value & 0x0F) / 8 - 1;
-        
-        // Send wave data to worker
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'write',
-                    address: 0xFF30 + index,
-                    value: value
-                });
-            } catch (e) {
-                console.error('Error sending wave buffer update to worker:', e);
-            }
-        }
     }
 
     disable() {
-        if (this.bufferSource) {
-            try {
-                this.bufferSource.disconnect();
-            } catch (e) {
-                console.error('Error disabling buffer source:', e);
-            }
-        }
+        this.bufferSource.disconnect();
     }
 
     enable() {
-        if (this.bufferSource && this.gainNode) {
-            try {
-                this.bufferSource.connect(this.gainNode);
-            } catch (e) {
-                console.error('Error enabling buffer source:', e);
-            }
-        }
+        this.bufferSource.connect(this.gainNode);
     }
 }
 
@@ -553,43 +453,43 @@ export class Channel4 {
         this.apu = apu;
         this.channelNumber = channelNumber;
         this.playing = false;
-        
-        // In a real implementation, we would create a noise generator here
-        // For this simplified version, we'll just track state
+
+        this.soundLengthUnit = 0x4000; // 1 / 256 second of instructions
+        this.soundLength = 64; // defaults to 64 periods
+        this.lengthCheck = false;
+
+        this.clockLength = 0;
+
+        this.audioContext = audioContext;
     }
 
     play() {
         if (this.playing) return;
         this.playing = true;
         this.apu.setSoundFlag(this.channelNumber, 1);
-        
-        // Notify worker to start playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'play',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending play message to worker:', e);
-            }
-        }
+        this.clockLength = 0;
     }
 
     stop() {
         this.playing = false;
         this.apu.setSoundFlag(this.channelNumber, 0);
-        
-        // Notify worker to stop playback
-        if (this.apu.useWorker && this.apu.worker) {
-            try {
-                this.apu.worker.postMessage({
-                    type: 'stop',
-                    channel: this.channelNumber
-                });
-            } catch (e) {
-                console.error('Error sending stop message to worker:', e);
+    }
+
+    update(clockElapsed) {
+        if (this.lengthCheck) {
+            this.clockLength  += clockElapsed;
+            if (this.clockLength > this.soundLengthUnit) {
+                this.soundLength--;
+                this.clockLength -= this.soundLengthUnit;
+                if (this.soundLength == 0) {
+                    this.setLength(0);
+                    this.stop();
+                }
             }
         }
+    }
+
+    setLength(value) {
+        this.soundLength = 64 - (value & 0x3F);
     }
 }

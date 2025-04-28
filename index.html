@@ -33,6 +33,10 @@
         #error {
             color: #f55;
             font-weight: bold;
+            padding: 10px;
+            background-color: rgba(255, 0, 0, 0.1);
+            border-left: 3px solid #f55;
+            margin: 10px 0;
         }
         .rom-section {
             margin: 20px 0;
@@ -160,7 +164,8 @@
         "./opcodes/opcodes-alu.js": "./opcodes/opcodes-alu.js",
         "./opcodes/opcodes-control.js": "./opcodes/opcodes-control.js",
         "./opcodes/opcodes-cb.js": "./opcodes/opcodes-cb.js",
-        "./hardware-constants.js": "./hardware-constants.js"
+        "./hardware-constants.js": "./hardware-constants.js",
+        "./debug.js": "./debug.js"
       }
     }
     </script>
@@ -191,6 +196,7 @@
 <p class="commands">
     <button onclick="g.pause(true);">Pause</button>
     <button onclick="g.pause(false);">Run</button>
+    <button id="debug-toggle" onclick="toggleDebugMode();">Debug Mode</button>
 </p>
 <p class="commands">
     <label><input id="sound-enable" type="checkbox" checked onchange="g.setSoundEnabled(this.checked);"/> Enable sound (experimental)</label>
@@ -247,11 +253,6 @@
 
 <!-- Implementation Toggle Script -->
 <script>
-// Check if browser supports Web Workers
-if (typeof Worker === 'undefined') {
-  console.warn('Web Workers are not supported in this browser. Audio processing will run on the main thread.');
-}
-
 // Check localStorage or default to refactored implementation
 const useOriginal = localStorage.getItem('useOriginalImplementation') === 'true';
 const toggleSwitch = document.getElementById('implementation-toggle');
@@ -266,6 +267,14 @@ toggleSwitch.addEventListener('change', function() {
     localStorage.setItem('useOriginalImplementation', (!this.checked).toString());
     location.reload(); // Reload the page to apply the change
 });
+
+// Function to toggle debug mode
+function toggleDebugMode() {
+    if (g) {
+        const isEnabled = g.toggleDebugger();
+        document.getElementById('debug-toggle').textContent = isEnabled ? 'Disable Debug' : 'Enable Debug';
+    }
+}
 
 // Load the appropriate implementation
 if (useOriginal) {
@@ -295,6 +304,7 @@ if (useOriginal) {
         // Import the GameboyJS namespace
         import GameboyJS from 'gameboy';
         import { Keyboard } from './input.js';
+        import { DebugSystem } from './debug.js';
 
         // Audio context initialization
         let audioContext = null;
@@ -332,7 +342,8 @@ if (useOriginal) {
                 romReaders: [
                     new GameboyJS.RomFileReader(),
                     new GameboyJS.RomDropFileReader(document.getElementById('dropzone'))
-                ]
+                ],
+                debugMode: false // Default to disabled
             };
             window.g = new GameboyJS.Gameboy(document.getElementById('canvas'), opts);
             g.setSoundEnabled(document.getElementById('sound-enable').checked);

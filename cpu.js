@@ -1,4 +1,4 @@
-// cpu.js - CPU implementation and register management
+// cpu.js - Updates to make the CPU work with the debugger
 
 import { opcodeMap, opcodeCbmap, CPUInterrupts } from './constants.js';
 import { Memory } from './memory.js';
@@ -19,6 +19,7 @@ export class CPU {
         this.isHalted = false;
         this.isPaused = false;
         this.usingBootRom = false;
+        this.debugMode = false;
 
         this.createDevices();
     }
@@ -48,10 +49,24 @@ export class CPU {
     reset() {
         this.memory.reset();
         this.r.sp = 0xFFFE;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU reset');
+        }
     }
 
     loadRom(data) {
-        this.memory.setRomData(data);
+        try {
+            this.memory.setRomData(data);
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.log(`ROM loaded: ${this.getGameName()}`);
+            }
+        } catch (error) {
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.handleError(error, 'Loading ROM');
+            } else {
+                throw error;
+            }
+        }
     }
 
     getRamSize() {
@@ -89,10 +104,16 @@ export class CPU {
             this.r.pc = 0x0100;
         }
         this.frame();
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU execution started');
+        }
     }
 
     stop() {
         clearTimeout(this.nextFrameTimer);
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU execution stopped');
+        }
     }
 
     // Fetch-and-execute loop
@@ -107,9 +128,7 @@ export class CPU {
             while (!vblank) {
                 var oldInstrCount = this.clock.c;
                 if (!this.isHalted) {
-                    var opcode = this.fetchOpcode();
-                    opcodeMap[opcode](this);
-                    this.r.F &= 0xF0; // tmp fix
+                    this.executeInstruction();
 
                     if (this.enableSerial) {
                         var instr = this.clock.c - oldInstrCount;
@@ -130,53 +149,117 @@ export class CPU {
                 this.checkInterrupt();
             }
             this.clock.c = 0;
+            
+            // Update debug performance metrics
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.updatePerformanceMetrics();
+                this.gameboy.debugger.updateUI();
+            }
         } catch (e) {
-            this.gameboy.handleException(e);
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.handleError(e, 'CPU Execution');
+            } else {
+                this.gameboy.handleException(e);
+            }
+        }
+    }
+
+    // Execute a single instruction
+    executeSingleInstruction() {
+        if (!this.isHalted) {
+            this.executeInstruction();
+        } else {
+            this.clock.c += 4;
+        }
+        
+        this.timer.update(4);
+        this.input.update();
+        this.apu.update(4);
+        this.checkInterrupt();
+        
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.updateUI();
+        }
+    }
+
+    executeInstruction() {
+        var opcode = this.fetchOpcode();
+        if (opcode !== null) {
+            // Record the opcode for debugging
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.recordOpcode(this.r.pc - 1, opcode);
+                
+                // Check for breakpoints
+                if (this.gameboy.debugger.checkBreakpoint(this.r.pc - 1)) {
+                    return;
+                }
+            }
+            
+            opcodeMap[opcode](this);
+            this.r.F &= 0xF0; // tmp fix
         }
     }
 
     fetchOpcode() {
-        var opcode = this.memory.rb(this.r.pc++);
-        if (opcode === undefined) {
-            console.log(opcode + ' at ' + (this.r.pc-1).toString(16));
-            this.stop();
-            return;
-        }
-        if (!opcodeMap[opcode]) {
-            console.error('Unknown opcode '+opcode.toString(16)+' at address '+(this.r.pc-1).toString(16)+', stopping execution...');
-            this.stop();
+        try {
+            var opcode = this.memory.rb(this.r.pc++);
+            if (opcode === undefined) {
+                throw new Error(`Invalid opcode at ${(this.r.pc-1).toString(16)}`);
+            }
+            if (!opcodeMap[opcode]) {
+                throw new Error(`Unknown opcode ${opcode.toString(16)} at address ${(this.r.pc-1).toString(16)}`);
+            }
+
+            return opcode;
+        } catch (error) {
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.handleError(error, 'Fetch Opcode');
+            } else {
+                console.error(error + ' at ' + (this.r.pc-1).toString(16));
+                this.stop();
+            }
             return null;
         }
-
-        return opcode;
     }
 
-    // read register
+    // Read register
     rr(register) {
         return this.r[register];
     }
 
-    // write register
+    // Write register
     wr(register, value) {
         this.r[register] = value;
     }
 
     halt() {
         this.isHalted = true;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU halted');
+        }
     }
     
     unhalt() {
         this.isHalted = false;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU unhalted');
+        }
     }
     
     pause() {
         this.isPaused = true;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('CPU paused');
+        }
     }
     
     unpause() {
         if (this.isPaused) {
             this.isPaused = false;
             this.frame();
+            if (this.gameboy.debugger) {
+                this.gameboy.debugger.log('CPU unpaused');
+            }
         }
     }
 
@@ -193,6 +276,10 @@ export class CPU {
                 this.disableInterrupts();
                 this.clock.c += 4; // 20 clocks to serve interrupt, with 16 for RSTn
                 CPU.interruptRoutines[i](this);
+                
+                if (this.gameboy.debugger) {
+                    this.gameboy.debugger.log(`Interrupt ${i} serviced`);
+                }
                 break;
             }
         }
@@ -204,6 +291,10 @@ export class CPU {
         IFval |= (1 << type)
         this.memory.wb(0xFF0F, IFval);
         this.unhalt();
+        
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log(`Interrupt ${type} requested`);
+        }
     }
 
     isInterruptEnable(type) {
@@ -212,10 +303,16 @@ export class CPU {
 
     enableInterrupts() {
         this.IME = true;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('Interrupts enabled');
+        }
     }
     
     disableInterrupts() {
         this.IME = false;
+        if (this.gameboy.debugger) {
+            this.gameboy.debugger.log('Interrupts disabled');
+        }
     }
 
     enableSerialTransfer() {
