@@ -247,6 +247,11 @@
 
 <!-- Implementation Toggle Script -->
 <script>
+// Check if browser supports Web Workers
+if (typeof Worker === 'undefined') {
+  console.warn('Web Workers are not supported in this browser. Audio processing will run on the main thread.');
+}
+
 // Check localStorage or default to refactored implementation
 const useOriginal = localStorage.getItem('useOriginalImplementation') === 'true';
 const toggleSwitch = document.getElementById('implementation-toggle');
