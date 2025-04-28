@@ -1,7 +1,7 @@
 // gameboy-audio-processor.js - AudioWorklet processor for GameBoy audio
 
 class GameboyAudioProcessor extends AudioWorkletProcessor {
-    constructor() {
+    constructor(options) {
         super();
         
         // Buffer to store audio samples from main thread
@@ -9,11 +9,20 @@ class GameboyAudioProcessor extends AudioWorkletProcessor {
         this.bufferSize = 0;
         this.readIndex = 0;
         
+        // Track silence to avoid audio noise
+        this.isActive = false;
+        this.silenceCounter = 0;
+        
+        // Get processor options
+        const processorOptions = options.processorOptions || {};
+        this.isEnabled = processorOptions.initiallyEnabled || false;
+        
         // Set up message port communication
         this.port.onmessage = (event) => {
             if (event.data.type === 'init') {
                 // Store sample rate and prepare for processing
                 this.sampleRate = event.data.sampleRate;
+                this.isEnabled = !!event.data.enabled;
             } else if (event.data.type === 'audioData') {
                 // Receive audio samples from main thread
                 this.addSamples(event.data.samples);
@@ -27,6 +36,20 @@ class GameboyAudioProcessor extends AudioWorkletProcessor {
     addSamples(samples) {
         // Add samples to the buffer
         if (!samples || samples.length === 0) return;
+        
+        // Check if we're receiving actual audio signal
+        let hasSignal = false;
+        for (let i = 0; i < samples.length; i++) {
+            if (Math.abs(samples[i]) > 0.01) {
+                hasSignal = true;
+                break;
+            }
+        }
+        
+        if (hasSignal) {
+            this.isActive = true;
+            this.silenceCounter = 0;
+        }
         
         // Copy samples to the buffer, with wrap-around if needed
         for (let i = 0; i < samples.length; i++) {
@@ -56,11 +79,27 @@ class GameboyAudioProcessor extends AudioWorkletProcessor {
         for (let i = 0; i < channel.length; i++) {
             if (this.readIndex < this.bufferSize) {
                 channel[i] = this.sampleBuffer[this.readIndex % this.sampleBuffer.length];
+                
+                // Count silent samples
+                if (Math.abs(channel[i]) < 0.01) {
+                    this.silenceCounter++;
+                    if (this.silenceCounter > 4410) { // ~100ms of silence
+                        this.isActive = false;
+                    }
+                } else {
+                    this.silenceCounter = 0;
+                }
+                
                 this.readIndex++;
             } else {
-                // Buffer underrun - output silence and request more samples
+                // Buffer underrun - output silence
                 channel[i] = 0;
                 this.requestSamples();
+            }
+            
+            // If we're supposed to be silent, force silence
+            if (!this.isEnabled || !this.isActive) {
+                channel[i] = 0;
             }
         }
         

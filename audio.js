@@ -23,20 +23,25 @@ export class APU {
         this.channel3 = new Channel3(3, this);
         this.channel4 = new Channel4(4, this);
         
+        // Initialize audio system in a suspended state
         this.initAudioSystem();
     }
     
     initAudioSystem() {
         try {
             window.AudioContext = window.AudioContext || window.webkitAudioContext;
-            this.audioContext = new AudioContext();
+            this.audioContext = new AudioContext({ latencyHint: 'interactive' });
+            
+            // Force the context to suspend immediately to prevent unwanted noise
+            this.audioContext.suspend();
             
             // Initialize worker
             this.initWorker();
             
             // Set up audio nodes
             this.gainNode = this.audioContext.createGain();
-            this.gainNode.gain.value = 0.5;
+            // Start with volume at 0 to avoid initial noise burst
+            this.gainNode.gain.value = 0;
             
             // Set up audio worklet instead of script processor
             this.initAudioWorklet();
@@ -54,30 +59,40 @@ export class APU {
             this.workletNode = new AudioWorkletNode(this.audioContext, 'gameboy-audio-processor', {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
-                outputChannelCount: [1]
+                outputChannelCount: [1],
+                processorOptions: {
+                    initiallyEnabled: false
+                }
             });
             
             // Set up message port communication between main thread and worklet
             this.workletNode.port.onmessage = (event) => {
                 if (event.data.type === 'needSamples') {
-                    // Request more samples from worker when worklet needs them
-                    if (this.enabled && this.worker) {
+                    // Only request samples if audio is actually enabled
+                    if (this.enabled && this.worker && this.audioContext.state === 'running') {
                         this.worker.postMessage({
                             type: 'process',
                             clockElapsed: 4194304 / this.audioContext.sampleRate * 128 // Clock cycles for 128 samples
+                        });
+                    } else {
+                        // Send silence when disabled
+                        this.workletNode.port.postMessage({
+                            type: 'audioData',
+                            samples: new Array(128).fill(0)
                         });
                     }
                 }
             };
             
-            // Connect audio graph
+            // Connect audio graph but keep the audioContext suspended
             this.workletNode.connect(this.gainNode);
             this.gainNode.connect(this.audioContext.destination);
             
-            // Start the worklet processor
+            // Start the worklet processor with a silent state
             this.workletNode.port.postMessage({
                 type: 'init',
-                sampleRate: this.audioContext.sampleRate
+                sampleRate: this.audioContext.sampleRate,
+                enabled: false
             });
         } catch (e) {
             console.error("AudioWorklet failed to initialize:", e);
@@ -99,23 +114,28 @@ export class APU {
                     // Initialize worker with current state
                     this.worker.postMessage({
                         type: 'init',
-                        enabled: this.enabled
+                        enabled: false // Start with audio disabled
                     });
                     break;
                     
                 case 'audioData':
-                    // Add audio data to buffer
-                    this.audioBuffer.push(data.output);
-                    if (this.audioBuffer.length > this.audioBufferSize) {
-                        this.audioBuffer.shift();
-                    }
-                    
-                    // Forward audio data to the worklet
-                    if (this.workletNode) {
-                        this.workletNode.port.postMessage({
-                            type: 'audioData',
-                            samples: this.audioBuffer.splice(0, Math.min(128, this.audioBuffer.length))
-                        });
+                    // Only process audio data if we're actually enabled
+                    if (this.enabled && this.audioContext.state === 'running') {
+                        // Add audio data to buffer
+                        if (data.output && data.output.length > 0) {
+                            this.audioBuffer.push(...data.output);
+                            if (this.audioBuffer.length > this.audioBufferSize) {
+                                this.audioBuffer.splice(0, this.audioBuffer.length - this.audioBufferSize);
+                            }
+                        }
+                        
+                        // Forward audio data to the worklet
+                        if (this.workletNode && this.audioBuffer.length > 0) {
+                            this.workletNode.port.postMessage({
+                                type: 'audioData',
+                                samples: this.audioBuffer.splice(0, Math.min(128, this.audioBuffer.length))
+                            });
+                        }
                     }
                     break;
                     
@@ -151,22 +171,57 @@ export class APU {
     }
 
     connect() {
-        if (this.audioContext && this.audioContext.state === 'suspended') {
-            this.audioContext.resume();
+        if (!this.audioContext) return;
+        
+        // Gradually increase gain to avoid audio pops
+        if (this.gainNode) {
+            this.gainNode.gain.value = 0;
+            this.gainNode.gain.linearRampToValueAtTime(0.5, this.audioContext.currentTime + 0.1);
         }
-        this.enabled = true;
-        this.worker?.postMessage({ type: 'enable', enabled: true });
+        
+        // Resume audioContext if suspended
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume().then(() => {
+                console.log('AudioContext resumed successfully');
+                
+                // Clear any existing buffer to avoid playback of stale audio
+                this.audioBuffer = [];
+                
+                // Mark audio as enabled
+                this.enabled = true;
+                
+                // Tell worker audio is now enabled
+                this.worker?.postMessage({ type: 'enable', enabled: true });
+                
+                // Reset all channels on the worker
+                this.worker?.postMessage({ type: 'resetChannels' });
+            });
+        } else {
+            this.enabled = true;
+            this.worker?.postMessage({ type: 'enable', enabled: true });
+            this.worker?.postMessage({ type: 'resetChannels' });
+        }
     }
 
     disconnect() {
         this.enabled = false;
+        
+        // Gradually decrease gain to avoid audio pops
+        if (this.gainNode && this.audioContext) {
+            this.gainNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + 0.1);
+        }
+        
+        // Tell worker audio is now disabled
         this.worker?.postMessage({ type: 'enable', enabled: false });
+        
+        // Clear audio buffer
+        this.audioBuffer = [];
     }
 
     // Updates the states of each channel given the elapsed time
     // (in instructions) since last update
     update(clockElapsed) {
-        if (!this.enabled || !this.worker) return;
+        if (!this.enabled || !this.worker || this.audioContext?.state !== 'running') return;
         
         // Process audio data in worker
         this.worker.postMessage({
@@ -296,7 +351,7 @@ export class APU {
             case 0xFF26:
                 value &= 0xF0;
                 this.memory[addr] = value;
-                this.enabled = (value & 0x80) == 0 ? false : false;
+                this.enabled = (value & 0x80) == 0 ? false : true;
                 if (!this.enabled) {
                     for (var i = 0xFF10; i < 0xFF27; i++)
                         this.memory[i] = 0;

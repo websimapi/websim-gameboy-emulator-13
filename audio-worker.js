@@ -32,7 +32,7 @@ class Channel1 {
   }
 
   update(clockElapsed) {
-    if (!this.playing) return 0;
+    if (!this.playing || !soundEnabled) return 0;
     
     this.clockEnvelop += clockElapsed;
     this.clockSweep += clockElapsed;
@@ -57,10 +57,12 @@ class Channel1 {
   }
   
   calculateSweepFrequency() {
+    if (this.sweepTime === 0 || this.sweepShifts === 0) return this.frequency;
+    
     const oldFreq = this.frequency;
     const newFreq = oldFreq + this.sweepSign * (oldFreq >> this.sweepShifts);
     
-    if (newFreq > 0x7FF) {
+    if (newFreq > 0x7FF || newFreq < 0) {
       this.stop();
       return 0;
     }
@@ -70,9 +72,18 @@ class Channel1 {
   
   updateWaveform(clockElapsed) {
     // Square wave generation with duty cycle 50%
+    // Avoid division by zero and overly high frequencies
+    if (this.frequency === 0 || this.frequency >= 2048) {
+      this.output = 0;
+      return;
+    }
+    
     const period = 131072 / (2048 - this.frequency);
     this.cyclePos = (this.cyclePos + clockElapsed / period) % 1.0;
-    this.output = this.cyclePos < 0.5 ? this.envelopeVolume * 1/15 : -this.envelopeVolume * 1/15;
+    
+    // Scale output to avoid excessive volume
+    const volume = this.envelopeVolume / 15 * 0.25;
+    this.output = this.cyclePos < 0.5 ? volume : -volume;
   }
   
   play() {
@@ -85,6 +96,16 @@ class Channel1 {
     this.playing = false;
     this.output = 0;
     postMessage({ type: 'channelStatusUpdate', channel: 1, playing: false });
+  }
+  
+  reset() {
+    this.playing = false;
+    this.output = 0;
+    this.cyclePos = 0;
+    this.clockLength = 0;
+    this.clockEnvelop = 0;
+    this.clockSweep = 0;
+    this.sweepCounter = 0;
   }
 }
 
@@ -104,12 +125,27 @@ class Channel3 {
   }
   
   update(clockElapsed) {
-    if (!this.playing) return 0;
+    if (!this.playing || !soundEnabled) return 0;
 
     // Wave playback logic
+    // Avoid division by zero
+    if (this.frequency === 0 || this.frequency >= 2048) {
+      this.output = 0;
+      return 0;
+    }
+    
     const period = 65536 / (2048 - this.frequency);
     this.wavePos = (this.wavePos + clockElapsed / period) % 32;
-    this.output = this.waveBuffer[Math.floor(this.wavePos)] * 0.25; // Reduce volume
+    
+    // Use weighted interpolation between samples
+    const pos = this.wavePos;
+    const index = Math.floor(pos);
+    const fraction = pos - index;
+    const sample1 = this.waveBuffer[index];
+    const sample2 = this.waveBuffer[(index + 1) % 32];
+    
+    // Linear interpolation with volume scaling
+    this.output = (sample1 * (1 - fraction) + sample2 * fraction) * 0.15;
     
     return this.output;
   }
@@ -132,6 +168,14 @@ class Channel3 {
       this.waveBuffer[index + 1] = samples[1];
     }
   }
+  
+  reset() {
+    this.playing = false;
+    this.output = 0;
+    this.wavePos = 0;
+    // Clear wave buffer to silence
+    this.waveBuffer.fill(0);
+  }
 }
 
 class Channel4 {
@@ -145,7 +189,7 @@ class Channel4 {
   }
   
   update(clockElapsed) {
-    if (!this.playing) return 0;
+    if (!this.playing || !soundEnabled) return 0;
     
     // Noise generation using LFSR
     this.clockPos += clockElapsed;
@@ -157,7 +201,8 @@ class Channel4 {
       this.lfsr = (this.lfsr >> 1) | (bit << 14);
       
       // Generate output based on LFSR (0 or 1)
-      const outputLevel = (this.lfsr & 0x1) ? this.envelopeVolume/15 : -this.envelopeVolume/15;
+      // Scale down noise output to avoid excessive volume
+      const outputLevel = (this.lfsr & 0x1) ? this.envelopeVolume/15 * 0.15 : -this.envelopeVolume/15 * 0.15;
       this.output = outputLevel;
     }
     
@@ -167,6 +212,7 @@ class Channel4 {
   play() {
     this.playing = true;
     this.lfsr = 0x7FFF;
+    this.clockPos = 0;
     postMessage({ type: 'channelStatusUpdate', channel: 4, playing: true });
   }
   
@@ -174,6 +220,13 @@ class Channel4 {
     this.playing = false;
     this.output = 0;
     postMessage({ type: 'channelStatusUpdate', channel: 4, playing: false });
+  }
+  
+  reset() {
+    this.playing = false;
+    this.output = 0;
+    this.lfsr = 0x7FFF;
+    this.clockPos = 0;
   }
 }
 
@@ -190,7 +243,21 @@ function processAudio(clockElapsed) {
   if (channels[4]) output += channels[4].update(clockElapsed);
   
   // Normalize combined output (prevent clipping)
-  return output * 0.25;
+  // Apply soft clipping to avoid harsh audio distortion
+  if (output > 1.0) output = Math.tanh(output);
+  else if (output < -1.0) output = -Math.tanh(-output);
+  
+  return output;
+}
+
+// Reset all channels to silence
+function resetAllChannels() {
+  for (let i = 1; i <= 4; i++) {
+    if (channels[i]) {
+      channels[i].reset();
+      channels[i].stop();
+    }
+  }
 }
 
 // Message handler for worker
@@ -204,6 +271,14 @@ self.onmessage = function(e) {
       
     case 'enable':
       soundEnabled = data.enabled;
+      if (!soundEnabled) {
+        // Ensure all channels are silent when disabled
+        resetAllChannels();
+      }
+      break;
+    
+    case 'resetChannels':
+      resetAllChannels();
       break;
       
     case 'createChannel':
@@ -248,14 +323,23 @@ self.onmessage = function(e) {
       break;
       
     case 'process':
+      // Only process when enabled
+      if (!soundEnabled) {
+        postMessage({
+          type: 'audioData',
+          output: new Array(128).fill(0)
+        });
+        return;
+      }
+      
       // Process audio for the given clock elapsed time
       // Generate a batch of samples
       const batchSize = 128; // Generate 128 samples per request
       const samplesPerCycle = data.clockElapsed / batchSize;
       
-      const outputs = [];
+      const outputs = new Array(batchSize);
       for (let i = 0; i < batchSize; i++) {
-        outputs.push(processAudio(samplesPerCycle));
+        outputs[i] = processAudio(samplesPerCycle);
       }
       
       postMessage({
