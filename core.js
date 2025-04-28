@@ -6,6 +6,7 @@ import { Screen } from './screen.js';
 import { GPU } from './gpu.js';
 import { Input } from './input.js';
 import { Rom } from './rom.js';
+import { APU } from './audio.js';
 import { UnimplementedException } from './utils.js';
 import { loadboot } from './bootrom.js';
 
@@ -16,7 +17,8 @@ const defaultOptions = {
     romReaders: [],
     statusContainerId: 'status',
     gameNameContainerId: 'game-name',
-    errorContainerId: 'error'
+    errorContainerId: 'error',
+    useAudioWorker: true // New option for audio worker support
 };
 
 // Gameboy class
